@@ -217,7 +217,7 @@ struct GrowableArray{
 };
 
 template<typename T>
-GrowableArray<T> StartArray(Arena* arena,int startCapacity = 1){
+GrowableArray<T> StartGrowableArray(Arena* arena,int startCapacity = 1){
   GrowableArray<T> res = {};
 
   res.arena = arena;
@@ -288,6 +288,8 @@ struct StringBuilder{
   void PushString(const char* format,...) __attribute__ ((format (printf, 2, 3)));
   void vPushString(const char* format,va_list args);
 
+  char GetLastCharacter();
+  
   void PushSpaces(int amount);
 };
 
@@ -515,7 +517,7 @@ struct TrieMap{
   
   bool Exists(Key key);
 
-  __attribute__((noinline)) Array<Pair<Key,Data>> AsArray(Arena* out);
+  Array<Pair<Key,Data>> AsArray(Arena* out);
 };
 
 template<typename Key,typename Data>
@@ -526,6 +528,56 @@ TrieMapIterator<Key,Data> begin(TrieMap<Key,Data>* map);
 
 template<typename Key,typename Data>
 TrieMapIterator<Key,Data> end(TrieMap<Key,Data>* map);
+
+/*
+  BiMap
+*/
+
+template<typename Key,typename Data>
+struct BiMapNode{
+  Key key;
+  Data data;
+
+  BiMapNode<Key,Data>* keyNext;
+  BiMapNode<Key,Data>* dataNext;
+  BiMapNode<Key,Data>* listNext;
+};
+
+template<typename Key,typename Data>
+struct BiMapIterator{
+  BiMapNode<Key,Data>* ptr;
+
+  bool operator!=(BiMapIterator& iter);
+  void operator++();
+  Pair<Key,Data> operator*();
+};
+
+template<typename Key,typename Data>
+struct BiMap{
+  Arena* arena;
+  int bucketCount;
+  BiMapNode<Key,Data>** keyBucket;
+  BiMapNode<Key,Data>** dataBucket;
+  BiMapNode<Key,Data>* listHead;
+  BiMapNode<Key,Data>* listTail;
+
+  // Returns false on failure to insert. We do not allow repeated anything, neither key or data can repeat.
+  // TODO: It might be useful to implement a different strategy to handle repeated stuff, but for now we only
+  //       care about no duplication
+  bool Insert(Key key,Data data);
+
+  Data* Get(Key key);
+  Key* GetReverse(Data data);
+};
+
+template<typename Key,typename Data>
+BiMap<Key,Data>* PushBiMap(Arena* arena,int bucketCount = 16);
+
+template<typename Key,typename Data>
+BiMapIterator<Key,Data> begin(BiMap<Key,Data>* map);
+
+template<typename Key,typename Data>
+BiMapIterator<Key,Data> end(BiMap<Key,Data>* map);
 
 /*
   TrieSet
@@ -1017,7 +1069,7 @@ Data* TrieMap<Key,Data>::Insert(Key key,Data data){
       (*current)[select] = node;
       inserted += 1;
       return &node->pair.second;
-    } else if((*current)[select]->pair.first == key){
+    } else if(Equal((*current)[select]->pair.first,key)){
       (*current)[select]->pair.second = data;
       return &(*current)[select]->pair.second;
     } else {
@@ -1072,7 +1124,7 @@ Data* TrieMap<Key,Data>::Get(Key key){
     int select = index & 3;
     if((*current)[select] == nullptr){
       return nullptr;
-    } else if((*current)[select]->valid && (*current)[select]->pair.first == key) {
+    } else if((*current)[select]->valid && Equal((*current)[select]->pair.first,key)) {
       return &(*current)[select]->pair.second;
     } else {
       current = &((*current)[select]->childs);
@@ -1312,6 +1364,145 @@ SetIterator<Data> end(Set<Data>* set){
 
   iter.innerIter = end(set->map);
   return iter;
+}
+
+/*
+  Bimap
+*/
+
+template<typename Key,typename Data>
+bool BiMapIterator<Key,Data>::operator!=(BiMapIterator<Key,Data>& iter){
+  bool res = (ptr == iter.ptr);
+  return res;
+}
+
+template<typename Key,typename Data>
+void BiMapIterator<Key,Data>::operator++(){
+  ptr = ptr->listNext;
+}
+
+template<typename Key,typename Data>
+Pair<Key,Data> BiMapIterator<Key,Data>::operator*(){
+  Pair<Key,Data> res = {};
+  res.first = ptr->key;
+  res.second = ptr->data;
+  return res;
+}
+
+template<typename Key,typename Data>
+bool BiMap<Key,Data>::Insert(Key key,Data data){
+  u64 keyHash = Hash(key) % bucketCount ;
+  u64 dataHash = Hash(data) % bucketCount;
+  
+  BiMapNode<Key,Data>* lastKeyPtr = nullptr;
+  for(BiMapNode<Key,Data>* ptr = keyBucket[keyHash];
+      ptr;
+      ptr = ptr->keyNext){
+    
+    if(ptr->key == key){
+      return false;
+    }
+    
+    lastKeyPtr = ptr;
+  }
+
+  BiMapNode<Key,Data>* lastDataPtr = nullptr;
+  for(BiMapNode<Key,Data>* ptr = dataBucket[dataHash];
+      ptr;
+      ptr = ptr->dataNext){
+    
+    if(ptr->data == data){
+      return false;
+    }
+    
+    lastDataPtr = ptr;
+  }
+
+  BiMapNode<Key,Data>* node = PushStruct<BiMapNode<Key,Data>>(arena);
+  node->key = key;
+  node->data = data;
+
+  if(lastKeyPtr){
+    lastKeyPtr->keyNext = node;
+  } else {
+    keyBucket[keyHash] = node;
+  }
+
+  if(lastDataPtr){
+    lastDataPtr->dataNext = node;
+  } else {
+    dataBucket[dataHash] = node;
+  }
+
+  if(!listHead){
+    listHead = node;
+    listTail = node;
+  } else {
+    listTail->listNext = node;
+    listTail = node;
+  }
+
+  return true;
+}
+
+template<typename Key,typename Data>
+Data* BiMap<Key,Data>::Get(Key key){
+  u64 keyHash = Hash(key) % bucketCount ;
+
+  BiMapNode<Key,Data>* ptr = keyBucket[keyHash];
+  for(; ptr; ptr = ptr->keyNext){
+    if(ptr->key == key){
+      break;
+    }
+  }
+  
+  if(ptr){
+    return &ptr->data;
+  } else {
+    return nullptr;
+  }
+}
+
+template<typename Key,typename Data>
+Key* BiMap<Key,Data>::GetReverse(Data data){
+  u64 dataHash = Hash(data) % bucketCount ;
+
+  BiMapNode<Key,Data>* ptr = dataBucket[dataHash];
+  for(; ptr; ptr = ptr->dataNext){
+    if(ptr->data == data){
+      break;
+    }
+  }
+  
+  if(ptr){
+    return &ptr->key;
+  } else {
+    return nullptr;
+  }
+}
+
+template<typename Key,typename Data>
+BiMap<Key,Data>* PushBiMap(Arena* arena,int bucketCount){
+  BiMap<Key,Data>* res = PushStruct<BiMap<Key,Data>>(arena);
+  res->arena = arena;
+  res->bucketCount = bucketCount;
+  res->dataBucket = PushArray<BiMapNode<Key,Data>*>(arena,bucketCount).data;
+  res->keyBucket = PushArray<BiMapNode<Key,Data>*>(arena,bucketCount).data;
+  
+  return res;
+}
+
+template<typename Key,typename Data>
+BiMapIterator<Key,Data> begin(BiMap<Key,Data>* map){
+  BiMapIterator<Key,Data> res = {};
+  res->ptr = map->listHead;
+  return res;
+}
+
+template<typename Key,typename Data>
+BiMapIterator<Key,Data> end(BiMap<Key,Data>* map){
+  BiMapIterator<Key,Data> res = {};
+  return res;
 }
 
 /*

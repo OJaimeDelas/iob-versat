@@ -7,6 +7,7 @@
 #include <cstdarg>
 
 #include "intrinsics.hpp"
+#include "utilsCore.hpp"
 
 #if defined(__SANITIZE_ADDRESS__)
 #pragma message "Using address sanitizer"
@@ -157,7 +158,7 @@ Arena* GetArena2(Arena* diff,Arena* diff2){
   }
 
   printf("Ran out of temporary arenas\n");
-  DEBUG_BREAK();
+  ENTER_DEBUG();
   return nullptr;
 }
 
@@ -173,7 +174,7 @@ Arena* GetSingleUseArena(){
   }
 
   printf("Ran out of single use arenas\n");
-  DEBUG_BREAK();
+  ENTER_DEBUG();
   return nullptr;
 }
 
@@ -378,6 +379,16 @@ void StringBuilder::vPushString(const char* format,va_list args){
   PushString(toPush);
 }
 
+char StringBuilder::GetLastCharacter(){
+  StringNode* ptr = this->tail;
+
+  if(ptr && ptr->used > 0){
+    return ptr->buffer[ptr->used];
+  }
+
+  return '\0';
+}
+
 void StringBuilder::PushSpaces(int amount){
   for(int i = 0; i < amount; i++){
     this->PushChar(' ');
@@ -431,11 +442,10 @@ String PushString(Arena* arena,String ss){
 }
 
 String vPushString(Arena* arena,const char* format,va_list args){
-  int extraBuffer; // Just to make sure that vsnprintf with 0 size does not cause problems with a nullptr we pass it just a bit of memory.
-  
   va_list copy;
   va_copy(copy,args);
 
+  int extraBuffer; // Just to make sure that vsnprintf with 0 size does not cause problems with a nullptr we pass it just a bit of memory.
   int stringSizeWithTerm = vsnprintf((char*) &extraBuffer,0,format,copy);
   char* buffer = (char*) PushBytes(arena,stringSizeWithTerm + 1);
 

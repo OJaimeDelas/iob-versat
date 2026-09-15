@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module AddressGen3 #(
+module AddressGen4 #(
    parameter ADDR_W   = 10,
    parameter PERIOD_W = 10,
    parameter DELAY_W  = 7,
@@ -35,7 +35,16 @@ module AddressGen3 #(
    input        [  ADDR_W - 1:0] iter3_i,
    input signed [  ADDR_W - 1:0] shift3_i,
 
+   input        [PERIOD_W - 1:0] per4_i,
+   input signed [  ADDR_W - 1:0] incr4_i,
+
+   input        [  ADDR_W - 1:0] iter4_i,
+   input signed [  ADDR_W - 1:0] shift4_i,
+
    input        [ DELAY_W - 1:0] delay_i,
+
+   input        [  ADDR_W - 1:0] work_i,
+   input        [  ADDR_W - 1:0] workSize_i,
 
    //outputs 
    output                valid_o,
@@ -86,13 +95,13 @@ module AddressGen3 #(
       .iter3_i(iter3_i),
       .shift3_i(shift3_i),
 
-      .per4_i  ({PERIOD_W{1'b0}}),
-      .incr4_i ({ADDR_W{1'b0}}),
-      .iter4_i ({ADDR_W{1'b0}}),
-      .shift4_i({ADDR_W{1'b0}}),
+      .per4_i(per4_i),
+      .incr4_i(incr4_i),
+      .iter4_i(iter4_i),
+      .shift4_i(shift4_i),
 
-      .work_i(0),
-      .workSize_i(0),
+      .work_i(work_i),
+      .workSize_i(workSize_i),
 
       .doneDatabus(doneDatabus),
       .doneAddress(doneAddress),

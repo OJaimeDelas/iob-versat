@@ -39,7 +39,7 @@ String JoinStrings(Array<String> strings,String separator,Arena* out);
 
 String PushBinaryRepr(Arena* out,int number);
 
-// nocheckin: Reorganize
+// TODO Reorganize
 String PushPointingString(Arena* out,int startPos,int size);
 Array<Value> ExtractValues(const char* format,String tok,Arena* arena);
 
@@ -448,7 +448,8 @@ Array<T> PushArray(Arena* out,ArenaList<T>* list){
     return {};
   }
 
-  auto arr = StartArray<T>(out);
+  // TODO: Add a count to arena list and remove this.
+  auto arr = StartGrowableArray<T>(out);
   
   FOREACH_LIST(SingleLink<T>*,iter,list->head){
     T* ptr = arr.PushElem();

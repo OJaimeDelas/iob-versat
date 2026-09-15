@@ -56,10 +56,19 @@ module VRead #(
    input [PERIOD_W-1:0] per2,
    input [  ADDR_W-1:0] shift2,
    input [  ADDR_W-1:0] incr2,
+
    input [  ADDR_W-1:0] iter3,
    input [PERIOD_W-1:0] per3,
    input [  ADDR_W-1:0] shift3,
    input [  ADDR_W-1:0] incr3,
+
+   input [  ADDR_W-1:0] iter4,
+   input [PERIOD_W-1:0] per4,
+   input [  ADDR_W-1:0] shift4,
+   input [  ADDR_W-1:0] incr4,
+
+   input [ADDR_W-1:0]   work,
+   input [ADDR_W-1:0]   workSize,
 
    input [DELAY_W-1:0]  extra_delay,
    input                ignore_first,
@@ -69,14 +78,14 @@ module VRead #(
 
    // output databus
    wire              transferDone;
-   reg               doneOutput;
-   wire              doneOutput_int;
+   wire              doneOutput;
 
    assign done = (transferDone  & doneOutput);
 
    wire data_valid,data_ready;
    wire [AXI_DATA_W-1:0] data_data;
 
+   /*
    always @(posedge clk, posedge rst) begin
       if (rst) begin
          doneOutput <= 1'b1;
@@ -86,6 +95,7 @@ module VRead #(
          if (doneOutput_int) doneOutput <= 1'b1;
       end
    end
+   */
 
    // Ping pong and related logic for the initial address
    reg pingPongState;
@@ -163,8 +173,16 @@ module VRead #(
       .iter3_i({ADDR_W{1'b0}}),
       .shift3_i({ADDR_W{1'b0}}),
 
+      .per4_i({PERIOD_W{1'b0}}),
+      .incr4_i({ADDR_W{1'b0}}),
+      .iter4_i({ADDR_W{1'b0}}),
+      .shift4_i({ADDR_W{1'b0}}),
+
       .doneDatabus(),
       .doneAddress(),
+
+      .work_i(0),
+      .workSize_i(0),
 
       //outputs 
       //.valid_o(gen_valid), // gen_valid
@@ -172,6 +190,7 @@ module VRead #(
       //.addr_o (gen_addr_temp), // gen_addr_temp
 
       .valid_o(),
+      .insideDuty_o(),
       .ready_i(1'b1),
       .addr_o (),
 
@@ -202,9 +221,9 @@ assign data_data = databus_rdata_0;
    wire [ADDR_W-1:0] gen_addr = {pingPong ? !pingPongState : gen_addr_temp[ADDR_W-1],gen_addr_temp[ADDR_W-2:0]};
 
    // mem enables output by addr gen
-   wire output_enabled;
+   wire read_mem,output_enabled,output_store_value;
 
-   AddressGen3 #(
+   AddressGen4 #(
       .ADDR_W(ADDR_W),
       .DATA_W(DATA_W),
       .PERIOD_W(PERIOD_W),
@@ -236,12 +255,24 @@ assign data_data = databus_rdata_0;
       .iter3_i(iter3),
       .shift3_i(shift3),
 
+      .per4_i(per4),
+      .incr4_i(incr4),
+      .iter4_i(iter4),
+      .shift4_i(shift4),
+
+      .work_i(work),
+      .workSize_i(workSize),
+
+      .doneAddress(doneOutput),
+      .doneDatabus(),
+
       //outputs 
-      .valid_o(output_enabled),
+      .valid_o(read_mem),
+      .insideDuty_o(output_enabled),
       .ready_i(1'b1),
       .addr_o (output_addr_temp),
-      .store_o(),
-      .done_o (doneOutput_int)
+      .store_o(output_store_value),
+      .done_o ()
    );
 
    wire [ADDR_W-1:0] true_output_addr = output_addr_temp;
@@ -289,11 +320,14 @@ assign data_data = databus_rdata_0;
    generate
       if (AXI_DATA_W > DATA_W) begin
          reg [DECISION_BIT_W-1:0] sel_0;  // Matches addr_0_port_0
+         reg [DECISION_BIT_W-1:0] sel_0_2; // TODO: We probably want to abstract this into its own module, also need to be able to handle variable delays in memories.
          always @(posedge clk, posedge rst) begin
             if (rst) begin
                sel_0 <= 0;
+               sel_0_2 <= 0;
             end else begin
                sel_0 <= output_addr[DECISION_BIT_START+:DECISION_BIT_W];
+               sel_0_2 <= sel_0;
             end
          end
 
@@ -302,7 +336,7 @@ assign data_data = databus_rdata_0;
             .OUTPUT_W(DATA_W),
             .SIZE_W  (DATA_W)
          ) adapter (
-            .sel_i(sel_0),
+            .sel_i(sel_0_2),
             .in_i (ext_2p_data_in_0),
             .out_o(out0_temp)
          );
@@ -313,15 +347,57 @@ assign data_data = databus_rdata_0;
       end  // if(AXI_DATA_W > DATA_W)
    endgenerate
 
+   // Need to delay done output to match memory latency
+   reg doneOutput_0,doneOutput_1;
+
    always @(posedge clk) begin
-      out0 <= out0_temp;
+      doneOutput_0 <= doneOutput;
+      doneOutput_1 <= doneOutput_0;
    end
+
+   // Need to delay to match memory latency
+   reg output_store_value_0,output_store_value_1;
+   always @(posedge clk) begin
+      output_store_value_0 <= output_store_value;
+      output_store_value_1 <= output_store_value_0;
+   end
+
+   reg output_enable_0,output_enable_1;
+   always @(posedge clk) begin
+      output_enable_0 <= output_enabled;
+      output_enable_1 <= output_enable_0;
+   end
+
+   always @(posedge clk) begin
+      out0 <= output_enable_1 ? out0_temp : 0;
+      if(!output_store_value_1) begin
+         out0 <= 0;               
+      end
+      if(doneOutput_1) begin
+         out0 <= 0;
+      end
+   end
+
+/*
+   reg [DATA_W-1:0] out0_temp2;
+
+   always @* begin
+      out0_temp2 = out0_temp;
+      if(doneOutput) begin
+         out0_temp2 = 0;
+      end
+   end
+
+   always @(posedge clk) begin
+      out0 <= out0_temp2;
+   end
+*/
 
    assign ext_2p_write_0    = write_en;
    assign ext_2p_addr_out_0 = write_addr;
    assign ext_2p_data_out_0 = write_data;
 
-   assign ext_2p_read_0     = output_enabled;
+   assign ext_2p_read_0     = read_mem;
    assign ext_2p_addr_in_0  = output_addr;
 
    reg reportedB;

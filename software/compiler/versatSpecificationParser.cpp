@@ -18,19 +18,35 @@
 // ======================================
 // Constants
 
-static SpecExpression SPEC_LITERAL_0 = {.val = 0,.type = SpecType_LITERAL};
-static MathExpression MATH_LITERAL_0 = {.val = 0,.type = SpecType_LITERAL};
+static readonly SP_Node SP_Node_Nil = {};
+
+// static readOnly SpecExpression SPEC_LITERAL_0 = {.val = 0,.type = SpecType_LITERAL};
+static readonly MathExpression MATH_LITERAL_0 = {.val = 0,.type = MathType_LITERAL};
+
+readonly Entity Entity_Nil = {.inst = &FUInstance_NilInst,.func = &ConfigFunction_Nil,.decl = &FUDeclaration_Nil};
 
 // NOTE: Spec expression is more associated to the equality operator when defining the graph
 //       Math expression is everything else
-//       One of the biggest differences is that a SpecExpression can contain delay statements "ex: x{0}", while a math expression cannot.
+//       One of the biggest differences is that a SpecExpression can contain delay statements "ex: x{0}", while a math expression cannot. We need to separate this because we also use { to start a scope and therefore we cannot have a '{'. This is stupid. 
 
 // TODO: We could join these into a single one if we can abstract the differences (which are not a lot).
 SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower = 99);
 MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower = 99);
 
-String GetUniqueName(String name,Arena* out,InstanceTable* names){
+int GetUniqueIndex(String baseName,InstanceTable* names){
+  TEMP_REGION(temp,nullptr);
+
   int counter = 0;
+  String uniqueName = baseName;
+  while(names->Exists(uniqueName)){
+    uniqueName = PushString(temp,"%.*s_%d",UN(baseName),counter++);
+  }
+
+  return counter;
+}
+
+String GetUniqueName(String name,Arena* out,InstanceTable* names,int counterStart = 0){
+  int counter = counterStart;
   String uniqueName = name;
   auto mark = MarkArena(out);
   while(names->Exists(uniqueName)){
@@ -41,10 +57,6 @@ String GetUniqueName(String name,Arena* out,InstanceTable* names){
   names->Insert(uniqueName,nullptr);
 
   return uniqueName;
-}
-
-String GetActualArrayName(String baseName,int index,Arena* out){
-  return PushString(out,"%.*s_%d",UN(baseName),index);
 }
 
 String GetActualArrayName(String baseName,Array<int> index,Arena* out){
@@ -59,15 +71,17 @@ String GetActualArrayName(String baseName,Array<int> index,Arena* out){
   return PushString(out,"%.*s_%.*s",UN(baseName),UN(idPart));
 }
 
-FUDeclaration* InstantiateMerge(MergeDef def){
+FUDeclaration* InstantiateMerge(MergeDef def,Array<ParamNameAndValue> params){
   TEMP_REGION(temp,nullptr);
   
   int size = def.declarations.size;
-  
+
   Array<FUDeclaration*> decl = PushArray<FUDeclaration*>(temp,size);
   for(int i = 0; i <  size; i++){
     TypeAndInstance tp = def.declarations[i];
-    FUDeclaration* d = GetTypeByNameOrFail(tp.typeName.identifier);
+    
+    FUDeclaration* d = GetTypeByName(tp.typeName.identifier,params);
+    Assert(d);
     decl[i] = d;
   }
 
@@ -94,126 +108,62 @@ FUDeclaration* InstantiateMerge(MergeDef def){
   return Merge(decl,name,def.specifics,modifier);
 }
 
-int GetRangeCount(Env* env,Range<MathExpression*> range){
-  int start = env->CalculateConstantExpression(range.start);
-  int end = env->CalculateConstantExpression(range.end);
-  
-  Assert(end >= start);
-  return (end - start + 1);
-}
-
-// Connection type and number of connections
-Pair<PortRangeType,int> GetConnectionInfo(Env* env,Var var){
-  Entity* ent = env->GetEntity(var.name);
-
-  int expectedRanges = 0;
-  if(ent->type == EntityType_FU_ARRAY){
-    expectedRanges = ent->arrayDims.size; // arraySize
-  }
-
-  if(var.index.size != expectedRanges){
-    env->ReportError(var.name,"Too many array subscriptions for this entity");
-  }
-
-  int totalRangeCount = 1;
-  for(Range<MathExpression*> range : var.index){
-    totalRangeCount *= GetRangeCount(env,range);
-  }
-
-  int indexCount = totalRangeCount;
-  int portCount = GetRangeCount(env,var.extra.port);
-  int delayCount = GetRangeCount(env,var.extra.delay);
-
-  if(indexCount == 1 && portCount == 1 && delayCount == 1){
-    return {PortRangeType_SINGLE,1};
-  }
-
-  // We cannot have more than one range at the same time because otherwise how do we decide how to connnect them?
-  if((indexCount != 1 && portCount != 1) ||
-     (indexCount != 1 && delayCount != 1) ||
-     (portCount != 1 && delayCount != 1)){
-    return {PortRangeType_ERROR,0};
-  }
-  
-  if(indexCount != 1){
-    return {PortRangeType_ARRAY_RANGE,indexCount};
-  }
-
-  if(portCount != 1){
-    return {PortRangeType_PORT_RANGE,portCount};
-  } else if(delayCount != 1){
-    return {PortRangeType_DELAY_RANGE,delayCount};
-  }
-  
-  NOT_POSSIBLE("Every condition should have been checked by now");
-  return {PortRangeType_ERROR,0};
-}
-
-bool IsValidGroup(Env* env,VarGroup group){
-  // TODO: Wether we can match the group or not.
-  //       It depends on wether the ranges line up or not. 
-  for(Var& var : group.vars){
-    if(GetConnectionInfo(env,var).first == PortRangeType_ERROR){
-      return false;
-    }
-  }
-
-  return true;
-}
-
-int NumberOfConnections(Env* env,VarGroup group){
-  if(!IsValidGroup(env,group)){
-    return 0;
-  }
-
-  int count = 0;
-
-  for(Var& var : group.vars){
-    count += GetConnectionInfo(env,var).second;
-  }
-
-  return count;
-}
-
 // TODO: Merge this function with the RegisterSubUnit function. There is no purpose to having this be separated.
-FUDeclaration* InstantiateModule(String content,ModuleDef def){
+FUDeclaration* InstantiateModule(String content,ModuleDef def,Array<ParamNameAndValue> topLevelParams){
   Arena* perm = globalPermanent;
   TEMP_REGION(temp,perm);
 
-  Accelerator* circuit = CreateAccelerator(def.name.identifier,AcceleratorPurpose_MODULE);
+  String mangledName = DECL_MangleName(def.name.identifier,topLevelParams,temp);
+
+  Accelerator* circuit = CreateAccelerator(mangledName,AcceleratorPurpose_MODULE);
 
   FREE_ARENA(envArena);
   FREE_ARENA(envArena2);
   Env* env = StartEnvironment(envArena,envArena2);
   env->circuit = circuit;
 
+  // Pass to check if out instance is used anywhere
   bool addOutputInstance = false;
-  for(ConnectionDef& decl : def.connections){
-    for(Var v : decl.input.vars){
+  for(ConnectionDef* decl : def.connections){
+    for(Var v : decl->input.vars){
       if(v.name.identifier == "out"){
         addOutputInstance = true;
         break;
       }
     }
 
-    for(Var v : decl.output.vars){
+    for(Var v : decl->output.vars){
       if(v.name.identifier == "out"){
         addOutputInstance = true;
         break;
       }
     }
   }
-
   if(addOutputInstance){
-    Entity* outEnt = env->PushReservedEntity("out");
-    outEnt->type = EntityType_FU;
-    outEnt->instance = CreateOrGetOutput(circuit);
-    env->table->Insert("out",outEnt->instance);
+    FUInstance* outInst = CreateOrGetOutput(circuit);
+
+    Entity outEnt = MakeEntity(outInst);
+    env->PushEntity("out",outEnt);
+    env->table->Insert("out",outInst);
   }
 
   auto paramList = PushList<ParameterDef>(temp);
   for(ParameterDeclaration param : def.params){
-    env->AddParam(param.name);
+    int val = 0;
+   
+    bool topOverride = false;
+    for(ParamNameAndValue p : topLevelParams){
+      if(p.name == param.name.identifier){
+        val = p.value;
+        topOverride = true;
+      }
+    }
+
+    if(!topOverride){
+      val = env->CalculateConstantExpression(param.defaultValue);
+    }
+
+    env->AddParam(param.name,val);
 
     ParameterDef* def = paramList->PushElem();
     
@@ -239,15 +189,38 @@ FUDeclaration* InstantiateModule(String content,ModuleDef def){
     }
   }
 
-  for(ConnectionDef& decl : def.connections){
-    Assert(decl.type != ConnectionType_NONE);
-    if(decl.type == ConnectionType_EQUALITY){
-      env->AddEquality(decl);
-    } else if(decl.type == ConnectionType_CONNECTION){
-      env->AddConnection(decl);
-    }
+  auto Recurse = [env](auto Recurse,ConnectionDef* top) -> void{
+    FULL_SWITCH(top->type){
+    case ConnectionType_NONE: Assert(false);
+    case ConnectionType_EQUALITY:{
+      env->AddEquality(*top);
+    } break;
+    case ConnectionType_CONNECTION:{
+      env->AddConnection(*top);
+    } break;
+    case ConnectionType_LOOP:{
+      int start = env->CalculateConstantExpression(top->loopStart);
+      int end = env->CalculateConstantExpression(top->loopEnd);
+      
+      for(int i = start; i < end; i++){
+        env->PushScope(EnvScopeType_FOR_LOOP);
+        env->AddParam(top->loopVar,i);
+
+        for(ConnectionDef* child : top->loopExpressions){
+          Recurse(Recurse,child);
+        }
+
+        env->PopScope();
+      }
+    } break;
   }
-  
+
+  };
+
+  for(ConnectionDef* decl : def.connections){
+    Recurse(Recurse,decl);
+  }
+
   FUDeclaration* res = RegisterSubUnit(circuit,params,SubUnitOptions_BAREBONES);
   
   {
@@ -264,6 +237,13 @@ FUDeclaration* InstantiateModule(String content,ModuleDef def){
 
   for(String error : env->errors){
     printf("%.*s\n",UN(error));
+  }
+
+  // TODO: We probably want to keep going and only print errors and exit at the top level after processing all the
+  //       modules that we have.
+  if(!Empty(env->errors)){
+    printf("[Error] On environment\n");
+    //exit(0);
   }
   
   return res;
@@ -284,8 +264,6 @@ bool IsModuleLike(ConstructDef def){
 }
 
 Array<Token> TypesUsed(ConstructDef def,Arena* out){
-  TEMP_REGION(temp,out);
-
   FULL_SWITCH(def.type){
   case ConstructType_MERGE: {
     // TODO: How do we deal with same types being used?
@@ -295,9 +273,9 @@ Array<Token> TypesUsed(ConstructDef def,Arena* out){
     return result;
   } break;
   case ConstructType_MODULE: {
-    Array<Token> result = Extract(def.module.declarations,temp,&InstanceDeclaration::typeName);
+    Array<Token> result = Extract(def.module.declarations,out,&InstanceDeclaration::typeName);
 
-    // nocheckin: TODO: Check repetition
+    // TODO: Check repetition
     return result;
     ///return Unique(result,out);
   } break;
@@ -330,15 +308,6 @@ FUDeclaration* InstantiateSpecifications(String content,ConstructDef def){
 // ======================================
 // Hierarchical access
 
-bool IsEntitySubType(EntityType type){
-  bool res = false;
-
-  res |= (type == EntityType_MEM_PORT);
-  res |= (type == EntityType_CONFIG_WIRE);
-  
-  return res;
-}
-
 Env* StartEnvironment(Arena* freeUse,Arena* freeUse2){
   Env* env = PushStruct<Env>(freeUse);
   env->scopeArena = freeUse;
@@ -346,10 +315,12 @@ Env* StartEnvironment(Arena* freeUse,Arena* freeUse2){
   env->scopes = PushArray<EnvScope*>(freeUse,99);
 
   env->currentScope = -1;
-  env->PushScope();
+  env->PushScope(EnvScopeType_GLOBAL);
 
-  env->errors = PushList<String>(freeUse2);
-  env->table = PushTrieMap<String,FUInstance*>(freeUse2);
+  env->computations = PushList<Entity>(env->miscArena);
+
+  env->errors = PushList<String>(env->miscArena);
+  env->table = PushTrieMap<String,FUInstance*>(env->miscArena);
 
   return env;
 }
@@ -360,11 +331,12 @@ void Env::ReportError(Token badToken,String msg){
   *this->errors->PushElem() = error;
 }
 
-void Env::PushScope(){
+void Env::PushScope(EnvScopeType type){
   this->currentScope += 1;
 
   ArenaMark mark = MarkArena(this->scopeArena);
   this->scopes[this->currentScope] = PushStruct<EnvScope>(this->scopeArena);
+  this->scopes[this->currentScope]->type = type;
   this->scopes[this->currentScope]->mark = mark;
   this->scopes[this->currentScope]->variable = PushTrieMap<String,Entity>(this->scopeArena);
 }
@@ -373,29 +345,30 @@ void Env::PopScope(){
   Assert(this->currentScope > 0);
 
   ArenaMark mark = this->scopes[this->currentScope]->mark;
+  EnvScopeType type = this->scopes[this->currentScope]->type;
   PopMark(mark);
+
+  if(type == EnvScopeType_FUNCTION){
+    computations = PushList<Entity>(miscArena);
+    currentComputationIndex = 0;
+  }
 
   this->currentScope -= 1;
 }
 
 FUInstance* Env::CreateInstance(FUDeclaration* type,String name){
-  // TODO: [0] 
+  // TODO-0 
 
   FUInstance* inst = CreateFUInstance(circuit,type,name);
 
-  Token tok = {};
-  tok.identifier = inst->name;
-  tok.type = TokenType_IDENTIFIER;
-  Entity* ent = PushNewEntity(tok);
-  ent->type = EntityType_FU;
-  ent->instance = inst;
+  Entity ent = MakeEntity(inst);
+  PushEntity(inst->name,ent);
 
   return inst;
 }
 
-
 FUInstance* Env::CreateFUInstanceWithDeclaration(FUDeclaration* type,String name,InstanceDeclaration decl){
-  // TODO: [0] 
+  // TODO-0 
 
   FUInstance* inst = CreateFUInstance(circuit,type,name);
   
@@ -411,36 +384,14 @@ FUInstance* Env::CreateFUInstanceWithDeclaration(FUDeclaration* type,String name
   return inst;
 }
 
-FUInstance* Env::GetFUInstance(Token name,int arrayIndexIfArray){
-  TEMP_REGION(temp,nullptr);
-
-  FUInstance* res = nullptr;
-  Entity* ent = GetEntity(name);
-
-  // TODO: Error reporting if entity does not exist.
-
-  String asStr = name.identifier;
-  if(ent->type == EntityType_FU_ARRAY){
-    asStr = GetActualArrayName(asStr,arrayIndexIfArray,temp);
-  }
-
-  res = table->GetOrElse(asStr,nullptr);
-  return res;
-}
-
 FUInstance* Env::GetFUInstance(Token name,Array<int> arrayIndexIfArray){
   TEMP_REGION(temp,nullptr);
 
   FUInstance* res = nullptr;
-  Entity* ent = GetEntity(name);
-  if(!ent){
-    ReportError(name,"Entity does not exist");
-    return nullptr;
-  }
+  Entity ent = GetEntity(name);
 
-  bool isArray = (ent->type == EntityType_FU_ARRAY);
+  bool isArray = (ent.type == EntityType_FU_ARRAY);
 
-  // TODO: Error reporting if entity does not exist.
   String asStr = name.identifier;
   if(isArray){
     asStr = GetActualArrayName(asStr,arrayIndexIfArray,temp);
@@ -461,10 +412,10 @@ FUInstance* Env::GetFUInstance(Var var){
   TEMP_REGION(temp,nullptr);
   
   FUInstance* res = nullptr;
-  Entity* ent = GetEntity(var.name);
+  Entity ent = GetEntity(var.name);
     
   String name = var.name.identifier;
-  if(ent->type == EntityType_FU_ARRAY){
+  if(ent.type == EntityType_FU_ARRAY){
     Array<int> index = ConvertRangeToIndex(var.index,temp);
     name = GetActualArrayName(name,index,temp);
   }
@@ -473,226 +424,484 @@ FUInstance* Env::GetFUInstance(Var var){
   return res;
 }
 
-Entity* Env::PushReservedEntity(String name){
-  auto res = this->scopes[this->currentScope]->variable->GetOrAllocate(name);
-
-  Assert(!res.alreadyExisted);
-
-  return res.data;
-}
-
-Entity* Env::PushNewEntity(Token name){
-  // MARK: We do not want to hardcode this.
-  //       Need to add the concept of reserved name and use it to add out and any special
-  //       entity bypassing any logic that checks names.
-  if(name.identifier == "out"){
-    ReportError(name,"Cannot have a variable with the reserved name out");
-  }
-
-  auto res = this->scopes[this->currentScope]->variable->GetOrAllocate(name.identifier);
-  
-  if(res.alreadyExisted){
-    ReportError(name,"Entity already exists. Rename entity to resolve conflict");
-  }
-
-  return res.data;
-}
-
-void Env::CheckIfEntityExists(Token name){
-  Entity* ent = GetEntity(name);
-  
-  // nocheckin: TODO: Currently not enabled since code is not properly
-  //                  setting values needed to make this properly work
-#if 0
-  if(!ent){
-    ReportError(name,"Entity does not exist");
-    DEBUG_BREAK();
-  }
-#endif
-}
-
-Entity* Env::GetEntity(Token name){
+Entity Env::GetEntity(Token name){
   for(int i = this->currentScope; i >= 0; i--){
     Entity* ent = this->scopes[i]->variable->Get(name.identifier);
 
     if(ent){
-      return ent;
+      return *ent;
     }
   }
 
-  return nullptr;
+  ReportError(name,"Entity does not exist");
+
+  return Entity_Nil;
 }
 
-Entity* Env::GetEntity(String name){
-  for(int i = this->currentScope; i >= 0; i--){
-    Entity* ent = this->scopes[i]->variable->Get(name);
+void Env::PushEntity(Token name,Entity ent){
+  auto res = this->scopes[this->currentScope]->variable->GetOrAllocate(name.identifier);
+  if(res.alreadyExisted){
+    ReportError(name,"An entity with this name already exists");
+    ENTER_DEBUG();
+  }
+  
+  *res.data = ent;
+}
 
-    if(ent){
-      return ent;
+void Env::PushEntity(String name,Entity ent){
+  auto res = this->scopes[this->currentScope]->variable->GetOrAllocate(name);
+  
+  if(res.alreadyExisted){
+    ENTER_DEBUG();
+    ReportError({},"An entity with this name already exists. This should be a programmer error since we should have already verified that this is not possible");
+  }
+  
+  *res.data = ent;
+}
+
+Entity Env::GetEntityFromAccess(Entity ent,Token accessName){
+  Entity res = Entity_Nil;
+
+  String access = accessName.identifier;
+
+  bool found = false;
+  FUDeclaration* decl = ent.decl;
+
+  Direction dir = Direction_NONE;
+  int port = 0;
+  if(access == "out0"){
+    dir = Direction_OUTPUT;
+  }
+  if(access == "out1"){
+    dir = Direction_OUTPUT;
+    port = 1;
+  }
+  if(access == "in0"){
+    dir = Direction_INPUT;
+  }
+  if(access == "in1"){
+    dir = Direction_INPUT;
+    port = 1;
+  }
+
+  if(dir != Direction_NONE){
+    res.type = EntityType_MEM_PORT;
+    res.dir = dir;
+    res.port = port;
+    found = true;
+  } 
+  
+  for(Wire& w : decl->configs){
+    if(w.name == access){
+      res.type = EntityType_CONFIG_WIRE;
+      res.name = accessName;
+
+      if(found){
+        // TODO-1
+        ReportError(accessName,"The identifier has a naming conflict");
+      }
+      found = true;
     }
   }
 
-  return nullptr;
+  for(Wire& w : decl->states){
+    if(w.name == access){
+      res.type = EntityType_STATE_WIRE;
+      res.name = accessName;
+
+      if(found){
+        // TODO-1
+        ReportError(accessName,"The identifier has a naming conflict");
+      }
+      found = true;
+    }
+  }
+
+  Token funcName = accessName;
+
+  for(MergePartition part : decl->info.infos){
+    for(ConfigFunction* func : part.userFunctions){
+      if(func->individualName == funcName.identifier){
+        res.type = EntityType_FUNCTION;
+        res.func = func;
+            
+        if(found){
+          // TODO-1
+          ReportError(funcName,"Multiple functions with same name detected\n");
+        }
+        found = true;
+      }
+    }
+  }
+
+  return res;
 }
 
-EntityAndLeftoverAccess Env::GetEntity(ConfigIdentifier* id,Arena* out){
+Array<Entity> Env::GetEntity(ConfigIdentifier* id,Arena* out){
   TEMP_REGION(temp,out);
 
-  ConfigIdentifier* ptr = id;
-  Assert(ptr->type == ConfigAccessType_BASE || ptr->type == ConfigAccessType_ARRAY);
+  ArenaList<Entity>* accessList = PushList<Entity>(temp);
 
-  Entity* ent = GetEntity(ptr->name);
-  
-  MathExpression* leftover = nullptr;
+  Entity current = Entity_Nil;
+  for(ConfigIdentifier* ptr = id; ptr; ptr = ptr->next){
+    Entity next = Entity_Nil;
 
-  ptr = ptr->next;
-  for(; ent && ptr; ptr = ptr->next){
-    Entity* nextEnt = nullptr;
+    FULL_SWITCH(ptr->type){
+    case ConfigIdentifierType_BASE:{
+      next = GetEntity(ptr->name);
+    } break;
+    case ConfigIdentifierType_ARRAY:{
+      MathExpression* expr = ptr->arrayExpr;
 
-    switch(ptr->type){
-      case ConfigAccessType_BASE:{
-        Assert(false);
-      } break;
-      case ConfigAccessType_ARRAY:{
-        if(ent->type == EntityType_FU_ARRAY){
-          Array<MathExpression*> arrayExpr = id->arrayExpr;
-
-          if(arrayExpr.size == ent->arrayDims.size + 1){
-            leftover = arrayExpr[arrayExpr.size - 1];
-            arrayExpr.size -= 1;
-          }
-
-          Array<int> arrayIndex = CalculateArraySize(arrayExpr);
-
-          String asStr = ent->arrayBaseName;
-          if(ent->type == EntityType_FU_ARRAY){
-            asStr = GetActualArrayName(asStr,arrayIndex,temp);
-          }
-
-          FUInstance* res = table->GetOrElse(asStr,nullptr);
-          
-          nextEnt = GetEntity(res->name);
+      bool found = false;
+      if(!found && current.type == EntityType_FU_ARRAY){
+        found = true;
+        
+        int index = CalculateConstantExpression(expr);
+        
+        if(index < 0 || index >= current.dims[0]){
+          ReportError({},"Outside array bounds");
         }
 
-        nextEnt = ent;
-      } break;
-      case ConfigAccessType_FUNC_CALL:{
-        Token funcName = ptr->functionName;
-        FUDeclaration* decl = ent->instance->declaration;
+        String arrayName = PushString(out,"%.*s_%d",UN(current.name.identifier),index);
+        
+        Array<int> newDims = Offset(current.dims,1);
 
-        for(MergePartition part : decl->info.infos){
-          for(ConfigFunction* func : part.userFunctions){
-            if(func->individualName == funcName.identifier){
-              Entity* userFunc = PushStruct<Entity>(out);
+        if(newDims.size > 0){
+          next.type = EntityType_FU_ARRAY;
+          
+          // TODO-2
+          next.name = {};
+          next.name.type = TokenType_IDENTIFIER;
+          next.name.identifier = arrayName;
+          next.name.originalData = arrayName;
 
-              userFunc->func = func;
-              userFunc->type = EntityType_CONFIG_FUNCTION;
+          next.dims = newDims;
+        } else {
+          FUInstance** possibleInst = table->Get(arrayName);
 
-              if(nextEnt) ReportError({},"Name collision");
-              nextEnt = userFunc;
-            }
+          if(!possibleInst){
+            ReportError({},"Inst does not exist");
+          } else {
+            next = MakeEntity(*possibleInst);
           }
         }
-      } break;
-      case ConfigAccessType_ACCESS:{
-        String access = ptr->name.identifier;
-
-        SWITCH(ent->type){
-        case EntityType_FU:{
-          Direction dir = Direction_NONE;
-          int port = 0;
-          if(access == "out0"){
-            dir = Direction_OUTPUT;
-          }
-          if(access == "out1"){
-            dir = Direction_OUTPUT;
-            port = 1;
-          }
-          if(access == "in0"){
-            dir = Direction_INPUT;
-          }
-          if(access == "in1"){
-            dir = Direction_INPUT;
-            port = 1;
-          }
-          
-          if(dir != Direction_NONE){
-            Entity* virtualWire = PushStruct<Entity>(out);
-            virtualWire->type = EntityType_MEM_PORT;
-            virtualWire->dir = dir;
-            virtualWire->port = port;
-            
-            if(nextEnt) ReportError({},"Name collision");
-            nextEnt = virtualWire;
-          } 
-          
-          FUDeclaration* decl = ent->instance->declaration;
-            
-          // TODO: We need to check if we have the same name for stuff. If
-          //       wire has the same name as a userConfig function then we have a problem and this
-          //       code will not act correctly. Furthermore, this check needs to be done elsewhere.
-          //       By the time we reach this point we are probably too far. Otherwise we need to 
-          for(Wire& w : decl->configs){
-            if(w.name == access){
-              Entity* wire = PushStruct<Entity>(out);
-              wire->wire = &w;
-              wire->type = EntityType_CONFIG_WIRE;
-              
-              if(nextEnt) ReportError({},"Name collision");
-              nextEnt = wire;
-              break;
-            }
-          }
-
-          for(Wire& w : decl->states){
-            if(w.name == access){
-              Entity* wire = PushStruct<Entity>(out);
-              wire->wire = &w;
-              wire->type = EntityType_STATE_WIRE;
-              
-              if(nextEnt) ReportError({},"Name collision");
-              nextEnt = wire;
-              break;
-            }
-          }
-        } break;
-
-        case EntityType_CONFIG_FUNCTION:
-        case EntityType_FU_ARRAY:
-        case EntityType_MEM_PORT:
-        case EntityType_PARAM:
-        case EntityType_CONFIG_WIRE:
-        case EntityType_STATE_WIRE:
-        case EntityType_VARIABLE_INPUT:
-        case EntityType_VARIABLE_SPECIAL:{
-          ReportError(ptr->name,"Cannot have access expression for entity of this type");
-        } break;
       }
-      } break;
+
+      if(!found && current.type == EntityType_VARIABLE_INPUT){
+        if(!found && current.flags == EntityVarFlags_ADDRESS){
+          found = true;
+
+          next.type = EntityType_ACCESS_EXPR;
+          next.name = ptr->name;
+          next.sym = SymbolicFromMathExpression(expr);
+        }
+
+        if(!found){
+          NOT_IMPLEMENTED("Probably gonna need to generate the 'variable' name");
+          ENTER_DEBUG();
+        }
+      }
+
+      if(!found){
+        found = true;
+        
+        next.type = EntityType_ACCESS_EXPR;
+        next.sym = SymbolicFromMathExpression(expr);
+      }
+    } break;
+    case ConfigIdentifierType_ACCESS:{
+      Token accessName = ptr->name;
+
+      if(current.type != EntityType_FU){
+        ReportError(accessName,"Trying to access entity that does not support member access");
+      }
+
+      if(current.type == EntityType_FU){
+        next = GetEntityFromAccess(current,accessName);
+
+        if(Nil(next)){
+          ReportError(accessName,"Not found");
+        }
+      }
+    } break;
+    case ConfigIdentifierType_FUNC_CALL:{
+      Token funcName = ptr->functionName;
+      FUDeclaration* decl = current.decl;
+
+      bool found = false;
+      for(MergePartition part : decl->info.infos){
+        for(ConfigFunction* func : part.userFunctions){
+          if(func->individualName == funcName.identifier){
+            next.type = EntityType_FUNCTION;
+            next.func = func;
+            
+            if(found){
+              // TODO-1
+              ReportError(funcName,"Multiple functions with same name detected\n");
+            }
+            found = true;
+          }
+        }
+      }
+    } break;
     }
 
-    if(nextEnt){
-      nextEnt->parent = ent;
+    if(!Nil(next)){
+      *accessList->PushElem() = next;
+      current = next;
+    } else {
+      ENTER_DEBUG();
     }
-
-    ent = nextEnt;
   }
 
-  EntityAndLeftoverAccess result = {};
-  result.ent = ent;
-  result.leftover = leftover;
+  Array<Entity> accesses = PushArray<Entity>(out,accessList);
+  return accesses;
+}
 
+Array<Entity> Env::GetEntity(MathExpression* spec,Arena* out){
+  TEMP_REGION(temp,out);
+
+  bool anyIllegalType = false;
+  ArenaList<Entity>* accessList = PushList<Entity>(temp);
+
+  auto Recurse = [this,&anyIllegalType,accessList,temp,out](auto Recurse,MathExpression* top,bool topFrame) -> Entity{
+    Entity ent = Entity_Nil;
+    
+    bool save = false;
+    FULL_SWITCH(top->type){
+    case MathType_NAME: {
+      ent = GetEntity(top->name);
+      save = true;
+
+      if(ent.type == EntityType_GEN_VALUE){
+        save = false;
+        ent.type = EntityType_SYM;
+        ent.sym = SYM_Lit(ent.val);
+      }  
+      if(ent.type == EntityType_PARAM){
+        save = false;
+        ent.type = EntityType_SYM;
+        ent.sym = SYM_Lit(ent.val);
+      }
+      
+      bool isVar = false;
+      isVar |= (ent.type == EntityType_VARIABLE_INPUT);
+
+      if(isVar) {
+        save = false;
+        ent.type = EntityType_SYM;
+        ent.sym = SYM_Var(top->name.identifier);
+      }
+
+    } break;
+    case MathType_ACCESS: {
+      Entity child = Recurse(Recurse,top->expressions[0],false);
+      ent = GetEntityFromAccess(child,top->name);
+      save = true;
+    } break;
+    
+    // We only care about the type of entity that makes the array. We already know that the access is an
+    // expression and we do not care about it.
+    case MathType_ARRAY_ACCESS: {
+      ent = GetEntity(top->name);
+      Entity indexOrSym = Recurse(Recurse,top->expressions[0],false);
+
+      bool found = false;
+      if(!found && ent.type == EntityType_VARIABLE_INPUT){
+        bool isAddress = (ent.flags & EntityVarFlags_ADDRESS);
+        bool isArray = ent.arrayDims > 0;
+
+        if(!isAddress && isArray){
+          int val = 0;
+          bool found2 = false;
+          if(indexOrSym.type == EntityType_GEN_VALUE){
+            found2 = true;
+            save = false;
+
+            val = indexOrSym.val;
+          }
+          if(indexOrSym.type == EntityType_SYM){
+            SYM_EvaluateResult res = SYM_ConstantEvaluate(indexOrSym.sym);
+
+            if(!res.Error()){
+              found2 = true;
+              save = false;
+
+              val = res.result;
+            }
+          }
+
+          if(found2){
+            found = true;
+            String trueName = PushString(temp,"%.*s[%d]",UN(ent.name.identifier),val);
+            ent.type = EntityType_SYM;
+            ent.sym = SYM_Var(trueName);
+          }
+        }
+      }
+
+      if(!found && indexOrSym.type == EntityType_SYM) {
+        found = true;
+        
+        // NOTE: Saving the actual FU first.
+        // TODO: Rewrite this code, kinda confusing.
+        *accessList->PushElem() = ent;
+
+        ent.type = EntityType_ACCESS_EXPR;
+        ent.name = ent.name;
+        ent.sym = indexOrSym.sym;
+      }
+    } break;
+
+    case MathType_OPERATION: {
+      save = false;
+
+      Entity left = Recurse(Recurse,top->expressions[0],false);
+      Entity right = Recurse(Recurse,top->expressions[1],false);
+
+      SYM_Expr symVal = SYM_Nil;
+
+      FULL_SWITCH(top->op){
+      case MathOperation_NIL:{
+        // Nothing
+      } break;
+      case MathOperation_ADD:{
+        symVal = left.sym + right.sym;
+      } break;
+      case MathOperation_SUB:{
+        symVal = left.sym - right.sym;
+      } break;
+      case MathOperation_MUL:{
+        symVal = left.sym * right.sym;
+      } break;
+      case MathOperation_DIV:{
+        symVal = left.sym / right.sym;
+      } break;
+    };
+
+      ent.type = EntityType_SYM;
+      ent.sym = symVal;
+    } break;
+
+    case MathType_LITERAL: {
+      save = false;
+
+      ent.type = EntityType_SYM;
+      ent.sym = SYM_Lit(top->val);
+    } break;
+    case MathType_FUNCTION_CALL:{
+      anyIllegalType = true;
+    } break;
+  }
+
+    if(topFrame){
+      save = true;
+    }
+
+    if(save && !Nil(ent)){
+      *accessList->PushElem() = ent;
+    }
+
+    return ent;
+  };
+ 
+  Recurse(Recurse,spec,true);
+
+  // TODO: Currently we just return empty but we probably wanna put some kind of error report in here.
+  //       Just need to start trying to make some examples that force this in order to check what is going on.
+  if(anyIllegalType){
+    return {};
+  }
+
+  Array<Entity> accesses = PushArray<Entity>(out,accessList);
+  return accesses;
+}
+
+FUAccess Env::ResolveFU(MathExpression* ptr,Arena* out){
+  TEMP_REGION(temp,out);
+
+  Entity entity = Entity_Nil;
+
+  auto list = PushList<MathExpression*>(temp);
+  
+  FULL_SWITCH(ptr->type){
+  case MathType_NAME: {
+    entity = GetEntity(ptr->name);
+  } break;
+  case MathType_ARRAY_ACCESS: {
+    entity = GetEntity(ptr->name);
+
+    bool outsideArray = false;
+    for(MathExpression* expr : ptr->expressions){
+      // If we stopped seeing array expressions to peel away a FU array than just
+      // push everything that remains into the leftovers array
+      if(entity.type != EntityType_FU_ARRAY){
+        outsideArray = true;
+      }
+      if(outsideArray){
+        *list->PushElem() = expr;
+        continue;
+      }
+
+      if(entity.type == EntityType_FU_ARRAY){
+        if(MathType_IsSymbolic(expr->type)){
+          int index = CalculateConstantExpression(expr);
+        
+          if(index < 0 || index >= entity.dims[0]){
+            ReportError({},"Outside array bounds");
+          }
+
+          String arrayName = PushString(out,"%.*s_%d",UN(entity.name.identifier),index);
+        
+          Array<int> newDims = Offset(entity.dims,1);
+
+          if(newDims.size > 0){
+            entity.type = EntityType_FU_ARRAY;
+          
+            // TODO-2
+            entity.name = {};
+            entity.name.type = TokenType_IDENTIFIER;
+            entity.name.identifier = arrayName;
+            entity.name.originalData = arrayName;
+
+            entity.dims = newDims;
+          } else {
+            FUInstance** possibleInst = table->Get(arrayName);
+
+            if(!possibleInst){
+              ReportError({},"Inst does not exist");
+            } else {
+              entity = MakeEntity(*possibleInst);
+            }
+          }
+        } else {
+          outsideArray = true;
+          *list->PushElem() = expr;
+        }
+      }
+    }
+  } break;
+  case MathType_LITERAL:
+  case MathType_OPERATION:
+  case MathType_ACCESS:
+  case MathType_FUNCTION_CALL: {
+  } break;
+  }
+
+  FUAccess result = {};
+  result.entity = entity;
+  result.leftovers = PushArray(out,list);
   return result;
 }
 
-Array<int> Env::CalculateArraySize(Array<MathExpression*> exprs){
+Array<int> Env::CalculateArraySize(Array<MathExpression*> exprs,Arena* out){
   if(exprs.size <= 0){
     Assert(false); // Not an error. Programmer cannot call this if empty (not an array)
   }
 
-  Array<int> res = PushArray<int>(scopeArena,exprs.size);
+  Array<int> res = PushArray<int>(out,exprs.size);
 
-  int arraySize = 1;
   for(int i = 0; i <  exprs.size; i++){
     MathExpression* expr = exprs[i];
     res[i] = CalculateConstantExpression(expr);
@@ -710,109 +919,12 @@ int Env::CalculateConstantExpression(MathExpression* top){
   SYM_Expr expr = SymbolicFromMathExpression(top);
   SYM_EvaluateResult eval = SYM_ConstantEvaluate(expr);
 
-  //Assert(!eval.Error());
+  if(eval.Error()){
+    // TODO: Report error
+    ReportError({},"Expected a constant expression. Cannot handle non constant expressions in here");
+  }
 
   return eval.result;
-}
-
-Entity* Env::GetEntity(MathExpression* id,Arena* out){
-  TEMP_REGION(temp,out);
-
-  Entity* ent = nullptr;
-
-  if(id->type == SpecType_NAME){
-    ent = GetEntity(id->name);
-  }
-  if(id->type == SpecType_ARRAY_ACCESS){
-    NOT_IMPLEMENTED();
-  }
-  if(id->type == SpecType_SINGLE_ACCESS){
-    ent = GetEntity(id->name);
-    
-    MathExpression* accessExpr = id->expressions[0];
-    Assert(accessExpr->type == SpecType_NAME);
-    
-    String access = accessExpr->name.identifier;
-
-    Direction dir = Direction_NONE;
-    int port = 0;
-    if(access == "out0"){
-      dir = Direction_OUTPUT;
-    }
-    if(access == "out1"){
-      dir = Direction_OUTPUT;
-      port = 1;
-    }
-    if(access == "in0"){
-      dir = Direction_INPUT;
-    }
-    if(access == "in1"){
-      dir = Direction_INPUT;
-      port = 1;
-    }
-
-    Entity* nextEnt = nullptr;
-    if(dir != Direction_NONE){
-      Entity* virtualWire = PushStruct<Entity>(out);
-      virtualWire->type = EntityType_MEM_PORT;
-      virtualWire->dir = dir;
-      virtualWire->port = port;
-      virtualWire->parent = ent;
-            
-      nextEnt = virtualWire;
-    } 
-          
-    FUDeclaration* decl = ent->instance->declaration;
-            
-    // TODO: We need to check if we have the same name for stuff. If
-    //       wire has the same name as a userConfig function then we have a problem and this
-    //       code will not act correctly. Furthermore, this check needs to be done elsewhere.
-    //       By the time we reach this point we are probably too far. Otherwise we need to 
-    for(Wire& w : decl->configs){
-      if(w.name == access){
-        Entity* wire = PushStruct<Entity>(out);
-        wire->wire = &w;
-        wire->type = EntityType_CONFIG_WIRE;
-              
-        if(nextEnt) ReportError({},"Name collision");
-        nextEnt = wire;
-        break;
-      }
-    }
-
-    for(Wire& w : decl->states){
-      if(w.name == access){
-        Entity* wire = PushStruct<Entity>(out);
-        wire->wire = &w;
-        wire->type = EntityType_STATE_WIRE;
-              
-        if(nextEnt) ReportError({},"Name collision");
-        nextEnt = wire;
-        break;
-      }
-    }
- 
-    for(MergePartition part : decl->info.infos){
-      for(ConfigFunction* func : part.userFunctions){
-        if(func->individualName == access){
-          Entity* userFunc = PushStruct<Entity>(out);
-
-          userFunc->func = func;
-          userFunc->type = EntityType_CONFIG_FUNCTION;
-          
-          if(nextEnt) ReportError({},"Name collision");
-          nextEnt = userFunc;
-        }
-      }
-    }
-    
-    if(nextEnt){
-      nextEnt->parent = ent;
-      ent = nextEnt;
-    }
-  }
-
-  return ent;
 }
 
 Array<int> Env::ConvertRangeToStart(Array<Range<MathExpression*>> range,Arena* out){
@@ -857,16 +969,16 @@ Array<int> Env::ConvertRangeToIndex(Array<Range<MathExpression*>> range,Arena* o
 void Env::AddInput(VarDeclaration var){
   TEMP_REGION(temp,nullptr);
 
-  Entity* ent = PushNewEntity(var.name);
+  Entity ent = Entity_Nil;
 
   if(var.arrayDims.size){
-    ent->type = EntityType_FU_ARRAY;
-    ent->arrayBaseName = var.name.identifier;
-    ent->arrayDims = CalculateArraySize(var.arrayDims);
+    ent.type = EntityType_FU_ARRAY;
+    ent.name = var.name;
+    ent.dims = CalculateArraySize(var.arrayDims,scopeArena);
 
-    auto zeroArray = PushArray<int>(temp,ent->arrayDims.size);
+    auto zeroArray = PushArray<int>(temp,ent.dims.size);
 
-    for(auto iter = StartIteration(ent->arrayDims,zeroArray,temp); iter->IsValid(); iter->Advance()){
+    for(auto iter = StartIteration(ent.dims,zeroArray,temp); iter->IsValid(); iter->Advance()){
       Array<int> index = iter->Current();
 
       String actualName = GetActualArrayName(var.name.identifier,index,temp);
@@ -877,32 +989,49 @@ void Env::AddInput(VarDeclaration var){
     FUInstance* input = CreateOrGetInput(circuit,var.name.identifier,insertedInputs++);
     table->Insert(input->name,input);
     
-    ent->type = EntityType_FU;
-    ent->instance = input;
+    ent.type = EntityType_FU;
+    ent.inst = input;
   }
 
-  ent->isInput = true;
+  ent.isInput = true;
+
+  PushEntity(ent.name,ent);
 }
 
 void Env::AddInstance(InstanceDeclaration decl,VarDeclaration var){
   TEMP_REGION(temp,nullptr);
 
+  auto l = PushList<ParamNameAndValue>(temp);
+  for(Pair<String,MathExpression*> p : decl.parameters){
+    String paramName = p.first;
+
+    int val = 0;
+    val = CalculateConstantExpression(p.second);
+
+    ParamNameAndValue* v = l->PushElem();
+    v->name = paramName;
+    v->value = val;
+  }
+  Array<ParamNameAndValue> params = PushArray(temp,l);
+
   FUDeclaration* type = GetTypeByName(decl.typeName.identifier);
   
   if(!type){
     ReportError(decl.typeName,"Typename does not exist");
+
+    type = &FUDeclaration_Nil;
   }
 
-  Entity* ent = PushNewEntity(var.name);
+  Entity ent = Entity_Nil;
 
   if(var.arrayDims.size){
-    ent->type = EntityType_FU_ARRAY;
-    ent->arrayBaseName = var.name.identifier;
-    ent->arrayDims = CalculateArraySize(var.arrayDims);
+    ent.type = EntityType_FU_ARRAY;
+    ent.name = var.name;
+    ent.dims = CalculateArraySize(var.arrayDims,scopeArena);
 
-    auto zeroArray = PushArray<int>(temp,ent->arrayDims.size);
+    auto zeroArray = PushArray<int>(temp,ent.dims.size);
 
-    for(auto iter = StartIteration(ent->arrayDims,zeroArray,temp); iter->IsValid(); iter->Advance()){
+    for(auto iter = StartIteration(ent.dims,zeroArray,temp); iter->IsValid(); iter->Advance()){
       Array<int> index = iter->Current();
 
       String actualName = GetActualArrayName(var.name.identifier,index,temp);
@@ -913,8 +1042,7 @@ void Env::AddInstance(InstanceDeclaration decl,VarDeclaration var){
     FUInstance* inst = CreateFUInstanceWithDeclaration(type,var.name.identifier,decl);
     table->Insert(inst->name,inst);
 
-    ent->type = EntityType_FU;
-    ent->instance = inst;
+    ent = MakeEntity(inst);
   }
 
   for(auto iter = StartIteration(this,ent,temp); iter.IsValid(); iter.Advance()){
@@ -946,6 +1074,8 @@ void Env::AddInstance(InstanceDeclaration decl,VarDeclaration var){
     } break;
     }
   }
+
+  PushEntity(ent.name,ent);
 }
 
 void Env::AddConnection(ConnectionDef decl){
@@ -961,11 +1091,11 @@ void Env::AddConnection(ConnectionDef decl){
   }
 
   if(out.Size() != in.Size()){
-    DEBUG_BREAK();
     ReportError(decl.output.vars[0].name,"Different size on connection");
     ReportError(decl.input.vars[0].name,"Different size on connection");
     printf("Left side has size: %d\n",out.Size());
     printf("Right side has size: %d\n",in.Size());
+    ENTER_DEBUG();
     return;
   }
 
@@ -1004,13 +1134,19 @@ void Env::AddEquality(ConnectionDef decl){
 
   // When dealing with equality, we can just increase array size by accessing higher and higher values.
   if(outVar.IsArrayAccess()){
+    NOT_IMPLEMENTED("Need to check if we are actually creating a new since need to allocate dims");
+#if 0
     auto res = this->scopes[this->currentScope]->variable->GetOrAllocate(outVar.name.identifier);
+
+    //if(
+
+
     Entity* ent = res.data;
 
     ent->type = EntityType_FU_ARRAY;
-    ent->arrayBaseName = outVar.name.identifier;
-
-    ent->arrayDims[0] = MAX(ent->arrayDims[0],CalculateConstantExpression(outVar.index[0].high));
+    ent->name = outVar.name;
+    ent->dims[0] = MAX(ent->dims[0],CalculateConstantExpression(outVar.index[0].high));
+#endif
   }
 
   String name = outVar.name.identifier;
@@ -1023,43 +1159,102 @@ void Env::AddEquality(ConnectionDef decl){
   String uniqueName = GetUniqueName(name,globalPermanent,table);
   inst->name = PushString(globalPermanent,uniqueName);
 
-  Token tok = {};
-  tok.type = TokenType_IDENTIFIER;
-  tok.identifier = inst->name;
-  Entity* ent = PushNewEntity(tok);
-  ent->type = EntityType_FU;
-  ent->instance = inst;
-
+  Entity ent = MakeEntity(inst);
+  PushEntity(inst->name,ent);
   table->Insert(inst->name,inst);
 }
 
-void Env::AddParam(Token name){
-  Entity* ent = GetEntity(name);
+Entity Env::AddParam(Token name,int val){
+  Entity ent = Entity_Nil;
+  ent.type = EntityType_PARAM;
+  ent.name = name;
+  ent.val = val;
+  PushEntity(name,ent);
 
-  if(ent){
-    ReportError(name,"This name is already being used");
-  }
-
-  Entity* entity = PushNewEntity(name);
-
-  entity->type = EntityType_PARAM;
-  entity->paramName = name.identifier;
+  return ent;
 }
 
-void Env::AddVariable(Token name){
-  Entity* ent = GetEntity(name);
+Entity Env::AddVariable(Token name,MathExpression* arraySize,EntityVarFlags flags){
+  Entity ent = Entity_Nil;
+  ent.type = EntityType_VARIABLE_INPUT;
+  ent.name = name;
+  ent.flags = flags;
 
-  if(ent){
-    ReportError(name,"This name is already being used");
+  if(arraySize){
+    ent.arrayDims = CalculateConstantExpression(arraySize);
   }
 
-  Entity* entity = PushNewEntity(name);
+  PushEntity(name,ent);
 
-  entity->type = EntityType_VARIABLE_INPUT;
-  entity->varName = name.identifier;
+  return ent;
 }
 
-#if 1
+#define RESERVED_COMP_TMPL "VERSAT_COMP_%d"
+
+Entity Env::AddComputation(String functionName,Array<SYM_Expr> expressions){
+  TEMP_REGION(temp,nullptr);
+
+  for(Entity& ent : computations){
+    bool found = true;
+    if(found && ent.functionName != functionName){
+      // TODO: If we do end up implementing partial functions we need to put the logic in here.
+      found = false;
+    }
+    if(found && ent.args.size != expressions.size){
+      // TODO: If we do end up implementing partial functions we need to put the logic in here.
+      found = false;
+    }
+    if(found){
+      for(int ii = 0; ii < ent.args.size; ii++){
+        if(!Equal(ent.args[ii],expressions[ii])){
+          found = false;
+        }
+      }
+    }
+
+    if(found){
+      return ent;
+    }
+  }
+
+  String entityName = PushString(miscArena,RESERVED_COMP_TMPL,currentComputationIndex);
+  currentComputationIndex += 1;
+
+  Entity* newEntity = computations->PushElem();
+  newEntity->type = EntityType_RUNTIME_COMPUTATION;
+  newEntity->name.identifier = entityName;
+  newEntity->name.originalData = entityName;
+  newEntity->args = CopyArray(expressions,miscArena);
+  newEntity->functionName = PushString(miscArena,functionName);
+
+  return this->AddVariable(newEntity->name);
+}
+
+Array<Entity> Env::GetAllComputations(Arena* out){
+  return PushArray(out,computations);
+}
+
+void Env::SetGenVariable(Token name,int value){
+  Entity* alreadyExists = nullptr;
+  for(int i = this->currentScope; i >= 0; i--){
+    alreadyExists = this->scopes[i]->variable->Get(name.identifier);
+
+    if(alreadyExists && alreadyExists->type == EntityType_GEN_VALUE){
+      break;
+    }
+  }
+
+  if(alreadyExists){
+    alreadyExists->val = value;
+  } else {
+    Entity ent = Entity_Nil;
+    ent.type = EntityType_GEN_VALUE;
+    ent.val = value;
+
+    PushEntity(name,ent);
+  }
+}
+
 void FUInstanceIterator::Advance(){
   if(iter){
     iter->Advance();
@@ -1079,12 +1274,10 @@ bool FUInstanceIterator::IsValid(){
 FUInstance* FUInstanceIterator::Current(){
   Assert(IsValid());
 
-  FUInstance* inst = ent->instance;
-  if(!iter){
-    return ent->instance;
-  } else {
+  FUInstance* inst = ent.inst;
+  if(iter){
     TEMP_REGION(temp,nullptr);
-    String baseName = ent->arrayBaseName;
+    String baseName = ent.name.identifier;
     String actualName = GetActualArrayName(baseName,iter->Current(),temp);
 
     inst = GetUnit(this->env->circuit,actualName);
@@ -1093,23 +1286,84 @@ FUInstance* FUInstanceIterator::Current(){
   return inst;
 }
 
-FUInstanceIterator StartIteration(Env* env,Entity* ent,Arena* out){
+FUInstanceIterator StartIteration(Env* env,Entity ent,Arena* out){
   TEMP_REGION(temp,out);
 
   FUInstanceIterator iter = {};
   iter.env = env;
   iter.ent = ent;
 
-  auto zeroArray = PushArray<int>(temp,ent->arrayDims.size);
-  if(ent->type == EntityType_FU_ARRAY){
-    iter.iter = StartIteration(ent->arrayDims,zeroArray,out);
+  auto zeroArray = PushArray<int>(temp,ent.dims.size);
+  if(ent.type == EntityType_FU_ARRAY){
+    iter.iter = StartIteration(ent.dims,zeroArray,out);
   } else {
     iter.iter = nullptr;
   }
 
   return iter;
 }
-#endif
+
+FUInstance* Env::InstantiateReduction(Var var,FUDeclaration* type){
+  TEMP_REGION(temp,nullptr);
+  Arena* perm = globalPermanent;
+
+  String typeName = type->name;
+
+  Array<int> start = ConvertRangeToStart(var.index,temp);
+  Array<int> end = ConvertRangeToEnd(var.index,temp);
+
+  // TODO-3
+  for(int i = 0; i < start.size; i++){
+    if(start[i] == end[i]){
+      end[i] += 1;
+    }
+  }
+
+  DimIterator* iter = StartIteration(end,start,temp);
+
+  int size = iter->Size();
+  Array<FUInstance*> buffer = PushArray<FUInstance*>(temp,size);
+  for(int i = 0; iter->IsValid(); i += 1,iter->Advance()){
+    Array<int> index = iter->Current();
+
+    String name = GetActualArrayName(var.name.identifier,index,globalPermanent);
+    buffer[i] = table->GetOrFail(name);
+  }
+      
+  Array<FUInstance*> buffer2 = PushArray<FUInstance*>(temp,size);
+      
+  // Tree shaped instanciation of units.
+  int uniqueIndex = GetUniqueIndex(typeName,table);
+  int amountOfUnits = size;
+  while(amountOfUnits > 1){
+    int newAmountOfUnits = 0;
+        
+    int index = 0;
+    while(index < amountOfUnits){
+      if(index + 2 <= amountOfUnits){
+        FUInstance* first = buffer[index];
+        FUInstance* second = buffer[index + 1];
+
+        String uniqueName = GetUniqueName(typeName,perm,table,uniqueIndex);
+        FUInstance* newUnit = CreateInstance(type,uniqueName);
+            
+        ConnectUnits(first,0,newUnit,0);
+        ConnectUnits(second,0,newUnit,1);
+          
+        buffer2[newAmountOfUnits++] = newUnit;
+        index += 2;
+      } else {
+        buffer2[newAmountOfUnits++] = buffer[index];
+        index += 1;
+      }
+    }
+        
+    amountOfUnits = newAmountOfUnits;
+    buffer = buffer2;
+  }
+      
+  return buffer[0];
+}
 
 PortExpression Env::InstantiateSpecExpression(SpecExpression* root){
   TEMP_REGION(temp,nullptr);
@@ -1118,7 +1372,24 @@ PortExpression Env::InstantiateSpecExpression(SpecExpression* root){
   PortExpression res = {};
 
   switch(root->type){
-    // Just to remove warnings. TODO: Change expression so that multiple locations have their own expression struct, instead of reusing the same one.
+    // Just to remove warnings.
+  case SpecType_FUNCTION_CALL:{
+    Token functionToken = root->name;
+    String functionName = functionToken.identifier;
+    Array<Var> args = root->varArgs;
+
+    if(functionName != "Reduce"){
+      ReportError(functionToken,"Unknown function name");
+    }
+
+    Var toReduce = args[0];
+    Token reduceTypeToken = args[1].name;
+    FUDeclaration* reduceType = GetTypeByName(reduceTypeToken.identifier);
+
+    res.inst = InstantiateReduction(toReduce,reduceType);
+    res.extra.port.end  = res.extra.port.start  = &MATH_LITERAL_0;
+    res.extra.delay.end = res.extra.delay.start = &MATH_LITERAL_0;
+  } break;
   case SpecType_LITERAL:{
     int number = root->val;
 
@@ -1154,26 +1425,76 @@ PortExpression Env::InstantiateSpecExpression(SpecExpression* root){
     res.extra = var.extra;
   } break;
   case SpecType_OPERATION:{
-    PortExpression expr0 = InstantiateSpecExpression(root->expressions[0]);
+    bool isReduceForm = (root->expressions.size == 0);
+    bool isUnary = (root->expressions.size == 1);
+    bool isBinary = (root->expressions.size == 2);
 
-    // Assuming right now very simple cases, no port range and no delay range
-    Assert(expr0.extra.port.start == expr0.extra.port.end);
-    Assert(expr0.extra.delay.start == expr0.extra.delay.end);
+    PortExpression expr0 = {};
+    if(isUnary || isBinary){
+      expr0 = InstantiateSpecExpression(root->expressions[0]);
+    }
+    PortExpression expr1 = {};
+    if(isBinary){
+      expr1 = InstantiateSpecExpression(root->expressions[1]);
+    }
 
-    if(root->expressions.size == 1){
-      Assert(root->op[0] == '~' || root->op[0] == '-');
+    // NAME
 
-      String typeName = {};
+    String typeName = {};
+    FULL_SWITCH(root->op){
+    case SpecOperation_NIL:{
+      // Nothing. Parser should report error already so no need to do anything more in here.
+    } break;
+    case SpecOperation_ADD:{
+      typeName = "ADD";
+    } break;
+    case SpecOperation_SUB:{
+      typeName = "SUB";
+    } break;
+    case SpecOperation_MUL:{
+      typeName = "MUL";
+    } break;
+    case SpecOperation_DIV:{
+      typeName = "DIV";
+    } break;
+    case SpecOperation_NOT:{
+      typeName = "NOT";
+    } break;
+    case SpecOperation_AND:{
+      typeName = "AND";
+    } break;
+    case SpecOperation_OR:{
+      typeName = "OR";
+    } break;
+    case SpecOperation_XOR:{
+      typeName = "XOR";
+    } break;
+    case SpecOperation_RHR:{
+      typeName = "RHR";
+    } break;
+    case SpecOperation_SHR:{
+      typeName = "SHR";
+    } break;
+    case SpecOperation_RHL:{
+      typeName = "RHL";
+    } break;
+    case SpecOperation_SHL:{
+      typeName = "SHL";
+    } break;
+    }
 
-      switch(root->op[0]){
-      case '~':{
-        typeName = "NOT";
-      }break;
-      case '-':{
-        typeName = "NEG";
-      }break;
-      }
+    if(isReduceForm){
+      Assert(root->op == SpecOperation_ADD || root->op == SpecOperation_MUL);
 
+      FUDeclaration* type = GetTypeByName(typeName);
+      res.inst = InstantiateReduction(root->var,type);
+      res.extra.port.end  = res.extra.port.start  = &MATH_LITERAL_0;
+      res.extra.delay.end = res.extra.delay.start = &MATH_LITERAL_0;
+    }
+
+    if(isUnary){
+      Assert(root->op == SpecOperation_NOT || root->op == SpecOperation_SUB);
+      
       String permName = GetUniqueName(typeName,perm,table);
       FUInstance* inst = CreateInstance(GetTypeByName(typeName),permName);
       table->Insert(inst->name,inst);
@@ -1185,65 +1506,33 @@ PortExpression Env::InstantiateSpecExpression(SpecExpression* root){
       res.inst = inst;
       res.extra.port.end  = res.extra.port.start  = &MATH_LITERAL_0;
       res.extra.delay.end = res.extra.delay.start = &MATH_LITERAL_0;
-
-      return res;
-    } else {
-      Assert(root->expressions.size == 2);
     }
 
-    PortExpression expr1 = InstantiateSpecExpression(root->expressions[1]);
+    if(isBinary){
+      // Assuming right now very simple cases, no port range and no delay range
+      Assert(expr1.extra.port.start == expr1.extra.port.end);
+      Assert(expr1.extra.delay.start == expr1.extra.delay.end);
 
-    // Assuming right now very simple cases, no port range and no delay range
-    Assert(expr1.extra.port.start == expr1.extra.port.end);
-    Assert(expr1.extra.delay.start == expr1.extra.delay.end);
+      String typeStr = typeName;
+      FUDeclaration* type = GetTypeByName(typeStr);
+      String uniqueName = GetUniqueName(type->name,perm,table);
 
-    String op = root->op;
-    const char* typeName;
-    if(CompareString(op,"&")){
-      typeName = "AND";
-    } else if(CompareString(op,"|")){
-      typeName = "OR";
-    } else if(CompareString(op,"^")){
-      typeName = "XOR";
-    } else if(CompareString(op,">><")){
-      typeName = "RHR";
-    } else if(CompareString(op,">>")){
-      typeName = "SHR";
-    } else if(CompareString(op,"><<")){
-      typeName = "RHL";
-    } else if(CompareString(op,"<<")){
-      typeName = "SHL";
-    } else if(CompareString(op,"+")){
-      typeName = "ADD";
-    } else if(CompareString(op,"-")){
-      typeName = "SUB";
-    } else {
+      FUInstance* inst = CreateInstance(type,uniqueName);
+      table->Insert(inst->name,inst);
 
-      
-      // TODO: Proper error reporting
-      printf("%.*s\n",UN(op));
-      Assert(false);
+      int start0 = CalculateConstantExpression(expr0.extra.port.start);
+      int delay0 = CalculateConstantExpression(expr0.extra.delay.start);
+
+      int start1 = CalculateConstantExpression(expr1.extra.port.start);
+      int delay1 = CalculateConstantExpression(expr1.extra.delay.start);
+
+      ConnectUnits(expr0.inst,start0,inst,0,delay0);
+      ConnectUnits(expr1.inst,start1,inst,1,delay1);
+
+      res.inst = inst;
+      res.extra.port.end  = res.extra.port.start  = &MATH_LITERAL_0;
+      res.extra.delay.end = res.extra.delay.start = &MATH_LITERAL_0;
     }
-
-    String typeStr = typeName;
-    FUDeclaration* type = GetTypeByName(typeStr);
-    String uniqueName = GetUniqueName(type->name,perm,table);
-
-    FUInstance* inst = CreateInstance(type,uniqueName);
-    table->Insert(inst->name,inst);
-
-    int start0 = CalculateConstantExpression(expr0.extra.port.start);
-    int delay0 = CalculateConstantExpression(expr0.extra.delay.start);
-
-    int start1 = CalculateConstantExpression(expr1.extra.port.start);
-    int delay1 = CalculateConstantExpression(expr1.extra.delay.start);
-
-    ConnectUnits(expr0.inst,start0,inst,0,delay0);
-    ConnectUnits(expr1.inst,start1,inst,1,delay1);
-
-    res.inst = inst;
-    res.extra.port.end  = res.extra.port.start  = &MATH_LITERAL_0;
-    res.extra.delay.end = res.extra.delay.start = &MATH_LITERAL_0;
   } break;
   }
 
@@ -1252,13 +1541,15 @@ PortExpression Env::InstantiateSpecExpression(SpecExpression* root){
 }
 
 SYM_Expr Env::SymbolicFromMathExpression(MathExpression* spec){
-  auto Recurse = [this](auto Recurse,MathExpression* top) -> SYM_Expr{
-    SYM_Expr res = SYM_Zero;
+  TEMP_REGION(temp,nullptr);
+
+  auto Recurse = [temp,this](auto Recurse,MathExpression* top) -> SYM_Expr{
+    SYM_Expr res = SYM_Nil;
 
     switch(top->type){
-    case SpecType_OPERATION:{
+    case MathType_OPERATION:{
       if(top->expressions.size == 1){
-        if(top->op[0] == '-' || top->op[0] == '~'){
+        if(top->op == MathOperation_SUB){
           SYM_Expr left  = Recurse(Recurse,top->expressions[0]);
           res = -left;
         } else {
@@ -1268,31 +1559,77 @@ SYM_Expr Env::SymbolicFromMathExpression(MathExpression* spec){
         SYM_Expr left  = Recurse(Recurse,top->expressions[0]);
         SYM_Expr right = Recurse(Recurse,top->expressions[1]);
 
-        if(top->op[0] == '+'){
+        FULL_SWITCH(top->op){
+        case MathOperation_NIL:{
+          // Nothing
+        } break;
+        case MathOperation_ADD:{
           res = left + right;
-        }
-        if(top->op[0] == '-'){
+        } break;
+        case MathOperation_SUB:{
           res = left - right;
-        }
-        if(top->op[0] == '*'){
+        } break;
+        case MathOperation_MUL:{
           res = left * right;
-        }
-        if(top->op[0] == '/'){
+        } break;
+        case MathOperation_DIV:{
           res = left / right;
+        } break;
         }
       }
     } break;
-    case SpecType_NAME:
-    case SpecType_VAR:{
-      CheckIfEntityExists(top->name);
-      res = SYM_Var(top->name.identifier);
+    case MathType_NAME:{
+      Entity ent = GetEntity(top->name);
+
+      bool found = false;
+      if(!found && ent.type == EntityType_GEN_VALUE){
+        found = true;
+        res = SYM_Lit(ent.val);
+      }
+      if(!found && ent.type == EntityType_PARAM){
+        found = true;
+        res = SYM_Lit(ent.val);
+      }
+
+      if(!found){
+        res = SYM_Var(top->name.identifier);
+      }
     } break;
-    case SpecType_LITERAL:{
+    case MathType_LITERAL:{
       res = SYM_Lit(top->val);
     } break;
-    case SpecType_SINGLE_ACCESS:
-    case SpecType_ARRAY_ACCESS:
-    case SpecType_FUNCTION_CALL: Assert(false);
+    case MathType_ARRAY_ACCESS: {
+      Entity ent = GetEntity(top->name);
+
+      if(ent.type == EntityType_VARIABLE_INPUT){
+        // TODO: Technically we should recurse but I do not want to convert from Sym_expr back to an integer 
+        //       when we can just access this directly.
+        MathExpression* index = top->expressions[0];
+        Token indexName = index->name;
+        Entity indexVal = GetEntity(indexName);
+
+        String fullName = PushString(temp,"%.*s[%d]",UN(top->name.originalData),indexVal.val);
+        res = SYM_Var(fullName);
+      }
+    } break;
+
+    case MathType_FUNCTION_CALL: {
+      Array<MathExpression*> args = top->expressions;
+
+      if(top->name.identifier == "Duty"){
+        res = SYM_Duty(Recurse(Recurse,top->expressions[0]),Recurse(Recurse,top->expressions[1]));
+      } else {
+        Array<SYM_Expr> expressions = PushArray<SYM_Expr>(temp,args.size);
+        for(int i = 0; i <  args.size; i++){
+          expressions[i] = SymbolicFromMathExpression(args[i]);
+        }
+
+        Entity funcEnt = AddComputation(top->name.identifier,expressions);
+        res = SYM_Var(funcEnt.name.identifier);
+      }
+    } break;
+
+    case MathType_ACCESS:  Assert(false);
     }
 
     return res;
@@ -1302,11 +1639,13 @@ SYM_Expr Env::SymbolicFromMathExpression(MathExpression* spec){
   return res;
 }
 
+// MARK PARSE FUNCTIONS START =================================================
+
 MathExpression* ParseNumberOnly(Parser* parser,Arena* out){
   MathExpression* res = PushStruct<MathExpression>(out);
 
   res->val = parser->ExpectNext(TokenType_NUMBER).number;
-  res->type = SpecType_LITERAL;
+  res->type = MathType_LITERAL;
 
   return res;
 }
@@ -1315,8 +1654,6 @@ Range<MathExpression*> ParseRange(Parser* parser,Arena* out){
   Range<MathExpression*> res = {};
 
   MathExpression* n1 = ParseNumberOnly(parser,out);
-
-  Assert(n1);
 
   res.start = n1;
   res.end = n1;
@@ -1328,26 +1665,37 @@ Range<MathExpression*> ParseRange(Parser* parser,Arena* out){
   return res;
 }
 
+Range<MathExpression*> ParseExprRange(Parser* parser,Arena* out){
+  Range<MathExpression*> res = {};
+
+  MathExpression* n1 = ParseMathExpression(parser,out);
+
+  res.start = n1;
+  res.end = n1;
+
+  if(parser->IfNextToken(TokenType_DOUBLE_DOT)){
+    res.end = ParseMathExpression(parser,out);
+  }
+  
+  return res;
+}
+
 Var ParseVar(Parser* parser,Arena* out){
   TEMP_REGION(temp,out);
   
   Token name = parser->ExpectNext(TokenType_IDENTIFIER);
 
-  bool isArrayAccess = false;
   auto list = PushList<Range<MathExpression*>>(temp); 
   while(parser->IfNextToken('[')){
-    Range<MathExpression*> range = ParseRange(parser,out);
+    Range<MathExpression*> range = ParseExprRange(parser,out);
     *list->PushElem() = range;
-
-    //isArrayAccess = true;
-
     parser->ExpectNext(']');
   }
   
   MathExpression* delayStart = &MATH_LITERAL_0;
   MathExpression* delayEnd = &MATH_LITERAL_0;
   if(parser->IfNextToken('{')){
-    Range<MathExpression*> range = ParseRange(parser,out);
+    Range<MathExpression*> range = ParseExprRange(parser,out);
     delayStart = range.start;
     delayEnd = range.end;
 
@@ -1478,6 +1826,7 @@ InstanceDeclaration ParseInstanceDeclaration(Parser* parser,Arena* out){
       while(!parser->Done()){
         Token peek = parser->PeekToken();
 
+
         if(peek.type == '}'){
           break;
         }
@@ -1502,6 +1851,35 @@ InstanceDeclaration ParseInstanceDeclaration(Parser* parser,Arena* out){
   }
 
   res.typeName = parser->ExpectNext(TokenType_IDENTIFIER);
+
+  if(parser->IfNextToken('<')){
+    auto list = PushList<ParamNameAndValue>(temp);
+    while(!parser->Done()){
+      if(parser->IfPeekToken('>')){
+        break;
+      }
+
+      Token parameterName = parser->ExpectNext(TokenType_IDENTIFIER);
+
+      parser->ExpectNext('=');
+
+      Token number = parser->ExpectNext(TokenType_NUMBER);
+
+      ParamNameAndValue* val = list->PushElem();
+      val->name = parameterName.identifier;
+      val->value = number.number;
+
+      if(parser->IfNextToken(',')){
+        continue;
+      }
+
+      break;
+    }
+    Array<ParamNameAndValue> params = PushArray(out,list);
+    res.metaParams = params;
+
+    parser->ExpectNext('>');
+  }
 
   Token possibleParameters = parser->PeekToken();
   auto list = PushList<Pair<String,MathExpression*>>(temp);
@@ -1590,11 +1968,11 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
     MathExpression* parsed = nullptr;
     if(!parsed &&  parser->IfNextToken('-')){
       parsed = PushStruct<MathExpression>(out);
-      parsed->op = "-";
+      parsed->op = MathOperation_SUB;
     }
 
     if(parsed){
-      parsed->type = SpecType_OPERATION;
+      parsed->type = MathType_OPERATION;
     }
 
     if(parsed && !topUnary){
@@ -1625,7 +2003,7 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
     Token number = parser->ExpectNext(TokenType_NUMBER);
     res = PushStruct<MathExpression>(out);
 
-    res->type = SpecType_LITERAL;
+    res->type = MathType_LITERAL;
     res->val = number.number;
   } else if(atom.type == TokenType_IDENTIFIER){
     TEMP_REGION(temp,out);
@@ -1634,7 +2012,7 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
 
     res = PushStruct<MathExpression>(out);
     res->name = name;
-    res->type = SpecType_NAME;
+    res->type = MathType_NAME;
 
     if(parser->IfPeekToken('[')){
       auto accesses = PushList<MathExpression*>(temp);       
@@ -1648,7 +2026,7 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
       }
 
       res->expressions = PushArray(out,accesses);
-      res->type = SpecType_ARRAY_ACCESS;
+      res->type = MathType_ARRAY_ACCESS;
     }
 
     // TODO: This is mostly for state right side.
@@ -1657,12 +2035,12 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
       Token singleAccessName = parser->ExpectNext(TokenType_IDENTIFIER);
       
       MathExpression* singleAccess = PushStruct<MathExpression>(out);
-      singleAccess->type = SpecType_NAME;
+      singleAccess->type = MathType_ACCESS;
       singleAccess->name = singleAccessName;
-      
-      res->expressions = PushArray<MathExpression*>(out,1);
-      res->expressions[0] = singleAccess;
-      res->type = SpecType_SINGLE_ACCESS;
+      singleAccess->expressions = PushArray<MathExpression*>(out,1);
+      singleAccess->expressions[0] = res;
+
+      res = singleAccess;
     }
 
     if(parser->IfNextToken('(')){
@@ -1683,7 +2061,7 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
       parser->ExpectNext(')');
       
       res->expressions = PushArray(out,args);
-      res->type = SpecType_FUNCTION_CALL;
+      res->type = MathType_FUNCTION_CALL;
     }
   } else {
     // TODO: Better error reporting
@@ -1700,7 +2078,7 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
   struct OpInfo{
     TokenType type;
     int bindingPower;
-    const char* op;
+    MathOperation op;
   };
 
   // TODO: This should be outside the function itself.
@@ -1708,11 +2086,11 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
 
   // TODO: Need to double check binding power
   auto infos = PushArray<OpInfo>(temp,4);
-  infos[0] = {TOK_TYPE('/'),0,"/"};
-  infos[1] = {TOK_TYPE('*'),0,"*"};
+  infos[0] = {TOK_TYPE('/'),0,MathOperation_DIV};
+  infos[1] = {TOK_TYPE('*'),0,MathOperation_MUL};
 
-  infos[2] = {TOK_TYPE('+'),1,"+"};
-  infos[3] = {TOK_TYPE('-'),1,"-"};
+  infos[2] = {TOK_TYPE('+'),1,MathOperation_ADD};
+  infos[3] = {TOK_TYPE('-'),1,MathOperation_SUB};
   
   // Parse binary ops.
   while(!parser->Done()){
@@ -1751,6 +2129,8 @@ MathExpression* ParseMathExpression(Parser* parser,Arena* out,int bindingPower){
 }
 
 SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower){
+  TEMP_REGION(temp,out);
+
   SpecExpression* topUnary = nullptr;
   SpecExpression* innerMostUnary = nullptr;
 
@@ -1761,11 +2141,11 @@ SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower){
     SpecExpression* parsed = nullptr;
     if(!parsed && parser->IfNextToken('~')){
       parsed = PushStruct<SpecExpression>(out);
-      parsed->op = "~";
+      parsed->op = SpecOperation_NOT;
     }
-    if(!parsed &&  parser->IfNextToken('-')){
+    if(!parsed && parser->IfNextToken('-')){
       parsed = PushStruct<SpecExpression>(out);
-      parsed->op = "-";
+      parsed->op = SpecOperation_SUB;
     }
 
     if(parsed){
@@ -1790,7 +2170,33 @@ SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower){
 
   // Parse atom
   Token atom = parser->PeekToken();
-  if(atom.type == '('){
+
+  if(atom.type == '+' || atom.type == '*'){
+    // Unary addition or reduced form.
+    Token peek = parser->PeekToken(0);
+    Token peek2 = parser->PeekToken(1);
+
+    if(peek.type == '+' && peek2.type == '('){
+      parser->NextToken();
+      parser->NextToken();
+
+      res = PushStruct<SpecExpression>(out);
+      res->op = SpecOperation_ADD;
+      res->var = ParseVar(parser,out);
+
+      parser->ExpectNext(')');
+    }
+    if(peek.type == '*' && peek2.type == '('){
+      parser->NextToken();
+      parser->NextToken();
+
+      res = PushStruct<SpecExpression>(out);
+      res->op = SpecOperation_MUL;
+      res->var = ParseVar(parser,out);
+        
+      parser->ExpectNext(')');
+    }
+  } else if(atom.type == '('){
     parser->ExpectNext('(');
 
     res = ParseSpecExpression(parser,out);
@@ -1803,13 +2209,37 @@ SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower){
     res->type = SpecType_LITERAL;
     res->val = number.number;
   } else if(atom.type == TokenType_IDENTIFIER){
-    TEMP_REGION(temp,out);
+    if(parser->IfPeekToken('(',1)){
+      Token functionName = parser->ExpectNext(TokenType_IDENTIFIER);
+      parser->ExpectNext('(');
+      
+      auto args = PushList<Var>(temp);
+      
+      while(!parser->Done()){
+        Var arg = ParseVar(parser,out);
 
-    Var var = ParseVar(parser,out);
+        *args->PushElem() = arg;
+        
+        if(parser->IfNextToken(',')){
+          continue;
+        }
+        
+        break;
+      }
+
+      parser->ExpectNext(')');
+      
+      res = PushStruct<SpecExpression>(out);
+      res->name = functionName;
+      res->varArgs = PushArray(out,args);
+      res->type = SpecType_FUNCTION_CALL;
+    } else {
+      Var var = ParseVar(parser,out);
     
-    res = PushStruct<SpecExpression>(out);
-    res->var = var;
-    res->type = SpecType_VAR;
+      res = PushStruct<SpecExpression>(out);
+      res->var = var;
+      res->type = SpecType_VAR;
+    }
   } else {
     // TODO: Better error reporting
     parser->ReportUnexpectedToken(atom,{});
@@ -1825,28 +2255,27 @@ SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower){
   struct OpInfo{
     TokenType type;
     int bindingPower;
-    const char* op;
+    SpecOperation op;
   };
 
   // TODO: This should be outside the function itself.
-  TEMP_REGION(temp,out);
   auto infos = PushArray<OpInfo>(temp,11);
 
   // TODO: Need to double check binding power
-  infos[0] = {TOK_TYPE('&'),0,"&"};
-  infos[1] = {TOK_TYPE('|'),0,"|"};
-  infos[2] = {TOK_TYPE('^'),0,"^"};
+  infos[0] = {TOK_TYPE('&'),0,SpecOperation_AND};
+  infos[1] = {TOK_TYPE('|'),0,SpecOperation_OR};
+  infos[2] = {TOK_TYPE('^'),0,SpecOperation_XOR};
 
-  infos[3] = {TokenType_ROTATE_LEFT,1,"><<"};
-  infos[4] = {TokenType_ROTATE_RIGHT,1,">><"};
-  infos[5] = {TokenType_SHIFT_LEFT,1,"<<"};
-  infos[6] = {TokenType_SHIFT_RIGHT,1,">>"};
+  infos[3] = {TokenType_ROTATE_LEFT,1,SpecOperation_RHL};
+  infos[4] = {TokenType_ROTATE_RIGHT,1,SpecOperation_RHR};
+  infos[5] = {TokenType_SHIFT_LEFT,1,SpecOperation_SHL};
+  infos[6] = {TokenType_SHIFT_RIGHT,1,SpecOperation_SHR};
 
-  infos[7]  = {TOK_TYPE('*'),2,"*"};
-  infos[8] = {TOK_TYPE('/'),2,"/"};
+  infos[7]  = {TOK_TYPE('*'),2,SpecOperation_MUL};
+  infos[8] = {TOK_TYPE('/'),2,SpecOperation_DIV};
 
-  infos[9] = {TOK_TYPE('+'),3,"+"};
-  infos[10] = {TOK_TYPE('-'),3,"-"};
+  infos[9] = {TOK_TYPE('+'),3,SpecOperation_ADD};
+  infos[10] = {TOK_TYPE('-'),3,SpecOperation_SUB};
   
   // Parse binary ops.
   while(!parser->Done()){
@@ -1884,43 +2313,79 @@ SpecExpression* ParseSpecExpression(Parser* parser,Arena* out,int bindingPower){
   return res;
 }
 
-ConnectionDef ParseConnection(Parser* parser,Arena* out){
-  VarGroup outPortion = ParseVarGroup(parser,out);
+ConnectionDef* ParseConnection(Parser* parser,Arena* out){
+  TEMP_REGION(temp,out);
 
+  ConnectionDef* def = PushStruct<ConnectionDef>(out);
+  
   ConnectionType type = ConnectionType_NONE;
-  
-  if(parser->IfNextToken('=')){
-    type = ConnectionType_EQUALITY;
-  } else if(parser->IfNextToken(TokenType_XOR_EQUAL)){
-    // TODO: We parse it but we do not use it. We probably wanna remove the testcase that uses this.
-    type = ConnectionType_EQUALITY;
-  } else if(parser->IfNextToken(TokenType_ARROW)){
-    type = ConnectionType_CONNECTION;
+  if(parser->IfNextToken(TokenType_KEYWORD_FOR)){
+#if 1
+    type = ConnectionType_LOOP;
+#endif
+  }
+
+  if(type == ConnectionType_LOOP){
+    Token loopVariable = parser->ExpectNext(TokenType_IDENTIFIER);
+
+    MathExpression* start = ParseMathExpression(parser,out);
+    parser->ExpectNext(TokenType_DOUBLE_DOT);
+    MathExpression* end = ParseMathExpression(parser,out);
+    
+    parser->ExpectNext('{');
+
+    auto list = PushList<ConnectionDef*>(temp);
+
+    while(!parser->Done()){
+      if(parser->IfPeekToken('}')){
+        break;
+      }
+      
+      *list->PushElem() = ParseConnection(parser,out);
+    }
+
+    parser->ExpectNext('}');
+
+    def->type = type;
+    def->loopVar = loopVariable;
+    def->loopStart = start;
+    def->loopEnd = end;
+    def->loopExpressions = PushArray(out,list);
   } else {
-    parser->ReportUnexpectedToken(parser->NextToken(),{TOK_TYPE('='),TokenType_ARROW});
+    VarGroup outPortion = ParseVarGroup(parser,out);
+
+    if(parser->IfNextToken('=')){
+      type = ConnectionType_EQUALITY;
+    } else if(parser->IfNextToken(TokenType_XOR_EQUAL)){
+      // TODO: We parse it but we do not use it. We probably wanna remove the testcase that uses this.
+      type = ConnectionType_EQUALITY;
+    } else if(parser->IfNextToken(TokenType_ARROW)){
+      type = ConnectionType_CONNECTION;
+    } else {
+      parser->ReportUnexpectedToken(parser->NextToken(),{TOK_TYPE('='),TokenType_ARROW});
+    }
+
+    SpecExpression* expr = nullptr;
+    VarGroup inPortion = {};
+
+    if(type == ConnectionType_EQUALITY){
+      expr = ParseSpecExpression(parser,out);
+    } else if(type == ConnectionType_CONNECTION){
+      inPortion = ParseVarGroup(parser,out);
+    }
+
+    def->type = type;
+    def->expression = expr;
+    def->output = outPortion;
+    def->input = inPortion;
+
+    parser->ExpectNext(';');
   }
-
-  ConnectionDef def = {};
-  SpecExpression* expr = nullptr;
-  VarGroup inPortion = {};
-
-  if(type == ConnectionType_EQUALITY){
-    expr = ParseSpecExpression(parser,out);
-  } else if(type == ConnectionType_CONNECTION){
-    inPortion = ParseVarGroup(parser,out);
-  }
-
-  parser->ExpectNext(';');
-  
-  def.type = type;
-  def.expression = expr;
-  def.output = outPortion;
-  def.input = inPortion;
 
   return def;
 }
 
-// TODO: nocheckin - remove forward decl
+// TODO: remove forward decl
 ConfigFunctionDef* ParseConfigFunction(Parser* parser,Arena* out);
 
 ParameterDeclaration ParseParameterDeclaration(Parser* parser,Arena* out){
@@ -1995,7 +2460,7 @@ ModuleDef ParseModuleDef(Parser* parser,Arena* out){
   }
   Array<InstanceDeclaration> declarations = PushArray(out,decls);
 
-  ArenaList<ConnectionDef>* cons = PushList<ConnectionDef>(temp);
+  ArenaList<ConnectionDef*>* cons = PushList<ConnectionDef*>(temp);
   if(parser->IfNextToken('#')){
     while(!parser->Done()){
       Token peek = parser->PeekToken();
@@ -2009,7 +2474,7 @@ ModuleDef ParseModuleDef(Parser* parser,Arena* out){
         break;
       }
 
-      ConnectionDef con = ParseConnection(parser,out);
+      ConnectionDef* con = ParseConnection(parser,out);
  
       *cons->PushElem() = con;
     }
@@ -2017,10 +2482,9 @@ ModuleDef ParseModuleDef(Parser* parser,Arena* out){
 
   auto configFunctions = PushList<ConfigFunctionDef>(temp);
 
-  // nocheckin
   if(parser->IfNextToken(TokenType_DOUBLE_HASHTAG)){
     while(!parser->Done()){
-      // nocheckin TODO: Probably remove this and move the logic from the function to here
+      // TODO: Probably remove this and move the logic from the function to here
       
       bool isConfigFunctionStart = false;
       
@@ -2112,26 +2576,103 @@ MergeDef ParseMerge(Parser* parser,Arena* out){
   }
 
   Token mergeName = parser->ExpectNext(TokenType_IDENTIFIER);
-  
-  parser->ExpectNext('=');
+
+  Array<ParameterDeclaration> params = {};
+  if(parser->IfNextToken('#')){
+    parser->ExpectNext('(');
+
+    auto paramList = PushList<ParameterDeclaration>(temp);
+    
+    while(!parser->Done()){
+      ParameterDeclaration param = ParseParameterDeclaration(parser,out);
+      *paramList->PushElem() = param;
+    
+      if(parser->IfNextToken(',')){
+        continue;
+      } else {
+        break;
+      }
+    }
+
+    parser->ExpectNext(')');
+
+    params = PushArray(out,paramList);
+  }
 
   ArenaList<TypeAndInstance>* declarationList = PushList<TypeAndInstance>(temp);
-  while(!parser->Done()){
-    TypeAndInstance typeInst = ParseTypeAndInstance(parser);
 
-    *declarationList->PushElem() = typeInst;
+  if(parser->IfNextToken('=')){
+    while(!parser->Done()){
+      TypeAndInstance typeInst = ParseTypeAndInstance(parser);
 
-    Token peek = parser->PeekToken();
-    if(peek.type == '|'){
-      parser->NextToken();
-      continue;
-    } else if(peek.type == '{'){
-      break;
-    } else if(peek.type == ';'){
-      parser->NextToken();
-      break;
+      *declarationList->PushElem() = typeInst;
+
+      Token peek = parser->PeekToken();
+      if(peek.type == '|'){
+        parser->NextToken();
+        continue;
+      } else if(peek.type == '{'){
+        break;
+      } else if(peek.type == ';'){
+        parser->NextToken();
+        break;
+      }
     }
+  } else if(parser->IfNextToken('{')){
+    while(!parser->Done()){
+      if(parser->IfPeekToken('}')){
+        break;
+      }
+
+      Token typeName = parser->ExpectNext(TokenType_IDENTIFIER);
+      
+      auto list = PushList<ParamNameAndValue2>(temp);
+      if(parser->IfNextToken('<')){
+        while(!parser->Done()){
+          if(parser->IfPeekToken('>')){
+            break;
+          }
+
+          Token parameterName = parser->ExpectNext(TokenType_IDENTIFIER);
+
+          parser->ExpectNext('=');
+
+          SYM_Expr expr = SYM_Nil;
+          Token next = parser->NextToken();
+          
+          if(next.type == TokenType_NUMBER){
+            expr = SYM_Lit(next.number);
+          } else if(next.type == TokenType_IDENTIFIER){
+            expr = SYM_Var(next.identifier);
+          }
+
+          ParamNameAndValue2* val = list->PushElem();
+          val->name = parameterName;
+          val->value = expr;
+
+          if(parser->IfNextToken(',')){
+            continue;
+          }
+
+          break;
+        }
+        parser->ExpectNext('>');
+      }
+      Array<ParamNameAndValue2> params = PushArray(out,list);
+
+      Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+      parser->ExpectNext(';');
+
+      TypeAndInstance* inst = declarationList->PushElem();
+      inst->instanceName = name;
+      inst->typeName = typeName;
+      inst->metaParams = params;
+    }
+    parser->ExpectNext('}');
+  } else {
+    parser->ReportError("Unexpected merge token");
   }
+
   Array<TypeAndInstance> declarations = PushArray(out,declarationList);
 
   Array<SpecNode> specNodes = {};
@@ -2190,6 +2731,7 @@ MergeDef ParseMerge(Parser* parser,Arena* out){
   result.declarations = declarations;
   result.specifics = specifics;
   result.mergeModifiers = mergeModifiers;
+  result.params = params;
   
   return result;
 }
@@ -2234,16 +2776,16 @@ Array<ConstructDef> ParseVersatSpecification(String content,Arena* out){
       
       TokenType type = TokenType_INVALID;
 
-      // TODO: We really need a fast way of checking this using size + character by character branching path.
-      //       However this is something that we want to push to the meta function generation. We do not want to actually write this and potentially get it wrong.
       if(id == "module")     type = TokenType_KEYWORD_MODULE;
       if(id == "merge")      type = TokenType_KEYWORD_MERGE;
       if(id == "share")      type = TokenType_KEYWORD_SHARE;
       if(id == "static")     type = TokenType_KEYWORD_STATIC;
       if(id == "debug")      type = TokenType_KEYWORD_DEBUG;
+      if(id == "sim")        type = TokenType_KEYWORD_SIM;
       if(id == "config")     type = TokenType_KEYWORD_CONFIG;
       if(id == "state")      type = TokenType_KEYWORD_STATE;
       if(id == "mem")        type = TokenType_KEYWORD_MEM;
+      if(id == "gen")        type = TokenType_KEYWORD_GEN;
       if(id == "for")        type = TokenType_KEYWORD_FOR;
 
       if(type != TokenType_INVALID){
@@ -2270,10 +2812,11 @@ Array<ConstructDef> ParseVersatSpecification(String content,Arena* out){
 
   FREE_ARENA(parseArena);
   Parser* parser = StartParsing(TokenizeFunction,content,parseArena,ParsingOptions_DEFAULT);
+  parser->debug = 0;
 
   // TODO:
-  // nocheckin: Kinda hacky way of doing this.
-  //            We cannot put filesystem stuff on the parser since parser is common.
+  // Kinda hacky way of doing this.
+  // We cannot put filesystem stuff on the parser since parser is common.
   DefaultTokenizerState* state = (DefaultTokenizerState*) parser->tokenizerState;
   FileContent contentAsFile = FILE_GetFileContentFromString(content);
   state->content = contentAsFile;
@@ -2286,7 +2829,16 @@ Array<ConstructDef> ParseVersatSpecification(String content,Arena* out){
     ConstructDef def = {};
     if(tok.type == TokenType_KEYWORD_MODULE){
       def.type = ConstructType_MODULE;
+      #if 1
       def.module = ParseModuleDef(parser,out);
+      #else
+      // MARK
+      def.node = SP_ParseModuleDef(parser,out);
+      def.module.node = def.node;
+
+      String repr = SP_Repr(def.node,temp);
+      printf("%.*s\n",UN(repr));
+      #endif
     } else if(tok.type == TokenType_KEYWORD_MERGE){
       def.type = ConstructType_MERGE;
       def.merge = ParseMerge(parser,out);
@@ -2316,66 +2868,18 @@ static ConfigIdentifier* ParseConfigIdentifier(Parser* parser,Arena* out){
   Token id = parser->ExpectNext(TokenType_IDENTIFIER);
   
   ConfigIdentifier* base = PushStruct<ConfigIdentifier>(out);
-  base->type = ConfigAccessType_BASE;
+  base->type = ConfigIdentifierType_BASE;
   base->name = id;
 
   ConfigIdentifier* ptr = base;
-  
-  auto list = PushList<MathExpression*>(temp);
-  while(parser->IfNextToken('[')){
-    MathExpression* expr = ParseMathExpression(parser,out);
-    *list->PushElem() = expr;
 
-    parser->ExpectNext(']');
-  }    
-
-  if(!Empty(list)){
-    ptr->type = ConfigAccessType_ARRAY;
-    ptr->arrayExpr = PushArray(out,list);
-  }
-
-  if(parser->IfNextToken('.')){
-    Token access = parser->ExpectNext(TokenType_IDENTIFIER);
-
-    ConfigIdentifier* parsed = nullptr;
-    if(parser->IfNextToken('(')){
-      auto args = PushList<MathExpression*>(temp);       
-      
-      while(!parser->Done()){
-        MathExpression* arg = ParseMathExpression(parser,out);
-
-        *args->PushElem() = arg;
-        
-        if(parser->IfNextToken(',')){
-          continue;
-        }
-        
-        break;
-      }
-
-      parser->ExpectNext(')');
-
-      parsed = PushStruct<ConfigIdentifier>(out);
-      parsed->type = ConfigAccessType_FUNC_CALL;
-      parsed->functionName = access;
-      parsed->arguments = PushArray(out,args);
-    } else {
-      parsed = PushStruct<ConfigIdentifier>(out);
-      parsed->type = ConfigAccessType_ACCESS;
-      parsed->name = access;
-    }
-
-    ptr->next = parsed;
-    ptr = parsed;
-  }
-
-#if 0
   while(!parser->Done()){
     ConfigIdentifier* parsed = nullptr;
 
     if(!parsed && parser->IfNextToken('.')){
       Token access = parser->ExpectNext(TokenType_IDENTIFIER);
 
+      // Function call syntax
       if(parser->IfNextToken('(')){
         auto args = PushList<MathExpression*>(temp);       
       
@@ -2394,12 +2898,12 @@ static ConfigIdentifier* ParseConfigIdentifier(Parser* parser,Arena* out){
         parser->ExpectNext(')');
 
         parsed = PushStruct<ConfigIdentifier>(out);
-        parsed->type = ConfigAccessType_FUNC_CALL;
+        parsed->type = ConfigIdentifierType_FUNC_CALL;
         parsed->functionName = access;
         parsed->arguments = PushArray(out,args);
       } else {
         parsed = PushStruct<ConfigIdentifier>(out);
-        parsed->type = ConfigAccessType_ACCESS;
+        parsed->type = ConfigIdentifierType_ACCESS;
         parsed->name = access;
       }
     }
@@ -2410,87 +2914,117 @@ static ConfigIdentifier* ParseConfigIdentifier(Parser* parser,Arena* out){
       parser->ExpectNext(']');
 
       parsed = PushStruct<ConfigIdentifier>(out);
-      parsed->type = ConfigAccessType_ARRAY;
+      parsed->type = ConfigIdentifierType_ARRAY;
 
-      parsed->arrayExpr = PushArray<MathExpression*>(out,1);
-      parsed->arrayExpr[0] = expr;
+      parsed->arrayExpr = expr;
     }
 
     if(parsed){
-      ptr->parent = parsed;
+      ptr->next = parsed;
       ptr = parsed;
+      continue;
     }
 
     break;
   }
-#endif
 
   return base;
 }
 
-static ConfigStatement* ParseConfigStatement(Parser* parser,Arena* out){
+static ConfigStatement* ParseConfigStatements(Parser* parser,Arena* out){
   TEMP_REGION(temp,out);
+
+  static ConfigStatement ConfigStatement_NIL = {};
   
-  ConfigStatement* stmt = PushStruct<ConfigStatement>(out);
+  ConfigStatement* head = &ConfigStatement_NIL;
+  ConfigStatement* ptr = nullptr;
+  
+  while(!parser->Done()){
+    bool isLoop = false;
+    bool isGen = false;
+    if(!isLoop && parser->IfNextToken(TokenType_KEYWORD_GEN)){
+      isLoop = true;
+      isGen = true;
+    }
+    if(!isLoop && parser->IfNextToken(TokenType_KEYWORD_FOR)){
+      isLoop = true;
+    }
 
-  if(parser->IfNextToken(TokenType_KEYWORD_FOR)){
-    Token loopVariable = parser->ExpectNext(TokenType_IDENTIFIER);
- 
-    MathExpression* start = ParseMathExpression(parser,out);
-    parser->ExpectNext(TokenType_DOUBLE_DOT);
-    MathExpression* end = ParseMathExpression(parser,out);
+    ConfigStatementType type = ConfigStatementType_EMPTY;
+    ConfigIdentifier* lhs = nullptr;
+    MathExpression* rhs = nullptr;
+    Token loopVariable = {};
+    MathExpression* start = nullptr;
+    MathExpression* end = nullptr;
+    ConfigStatement* child = nullptr;
 
-    parser->ExpectNext('{');
+    if(isLoop){
+      loopVariable = parser->ExpectNext(TokenType_IDENTIFIER);
+      
+      start = ParseMathExpression(parser,out);
+      parser->ExpectNext(TokenType_DOUBLE_DOT);
+      end = ParseMathExpression(parser,out);
 
-    auto list = PushList<ConfigStatement*>(temp);
-    while(!parser->Done()){
-      ConfigStatement* child = ParseConfigStatement(parser,out);
-      *list->PushElem() = child;
+      parser->ExpectNext('{');
+      child = ParseConfigStatements(parser,out);
+      parser->ExpectNext('}');
 
-      if(parser->IfPeekToken('}')){
-        break;
+      if(isGen){
+        type = ConfigStatementType_GEN_LOOP;
+      } else {
+        type = ConfigStatementType_FOR_LOOP;
+      }
+    }
+    
+    if(!isLoop){
+      if(parser->IfPeekToken(TokenType_IDENTIFIER)){
+        lhs = ParseConfigIdentifier(parser,out);
+
+        if(parser->IfNextToken('=')){
+          rhs = ParseMathExpression(parser,out);
+          parser->ExpectNext(';');
+          type = ConfigStatementType_EQUALITY;
+        }
+        if(parser->IfNextToken(';')){
+          type = ConfigStatementType_FUNCTION_CALL;
+        }
       }
     }
 
-    parser->ExpectNext('}');
-    
-    stmt->def.loopVariable = loopVariable.identifier;
-    stmt->def.startSym = start;
-    stmt->def.endSym = end;
-    stmt->childs = PushArray(out,list);
-    stmt->type = ConfigStatementType_FOR_LOOP;
-  } else if(parser->IfPeekToken(TokenType_IDENTIFIER)) {
-    stmt->lhs = ParseConfigIdentifier(parser,out);
+    ConfigStatement* parsed = PushStruct<ConfigStatement>(out);
+    parsed->type = type;
+    parsed->lhs = lhs;
+    parsed->rhs = rhs;
+    parsed->def.loopVariable = loopVariable;
+    parsed->def.startSym = start;
+    parsed->def.endSym = end;
+    parsed->child = child;
 
-    if(parser->IfNextToken('=')){
-      stmt->rhs = ParseMathExpression(parser,out);
-      parser->ExpectNext(';');
-      stmt->type = ConfigStatementType_EQUALITY;
-    } else {
-      parser->ExpectNext(';');
-      stmt->type = ConfigStatementType_FUNCTION_CALL;
+    if(type == ConfigStatementType_EMPTY){
+      break;
     }
-  } else {
-    parser->ReportUnexpectedToken(parser->NextToken(),{});
-    // TODO: stmt = EmptyStmt (Return something so that code does not have to worry about null statements).
+    
+    if(ptr){
+      ptr->next = parsed;
+      ptr = ptr->next;
+    }
+    if(!ptr){
+      head = ptr = parsed;
+    }
   }
 
-  return stmt;
+  return head;
 }
 
-static ConfigVarDeclaration ParseConfigVarDeclaration(Parser* parser){
+static ConfigVarDeclaration ParseConfigVarDeclaration(Parser* parser,Arena* out){
   ConfigVarDeclaration res = {};
 
   res.name = parser->ExpectNext(TokenType_IDENTIFIER);
 
   if(parser->IfNextToken('[')){
-    Token number = parser->ExpectNext(TokenType_NUMBER);
-    int arraySize = number.number;
-
+    MathExpression* arraySize = ParseMathExpression(parser,out);
     parser->ExpectNext(']');
-
     res.arraySize = arraySize;
-    res.isArray = true;
   }
 
   Token type = {};
@@ -2515,7 +3049,7 @@ static Array<ConfigVarDeclaration> ParseConfigFunctionArguments(Parser* parser,A
       break;
     }
 
-    ConfigVarDeclaration var = ParseConfigVarDeclaration(parser);
+    ConfigVarDeclaration var = ParseConfigVarDeclaration(parser,out);
 
     *list->PushElem() = var;
     
@@ -2548,6 +3082,7 @@ ConfigFunctionDef* ParseConfigFunction(Parser* parser,Arena* out){
   }
 
   bool debug = parser->IfNextToken(TokenType_KEYWORD_DEBUG);
+  bool sim = parser->IfNextToken(TokenType_KEYWORD_SIM);
     
   Token configName = parser->ExpectNext(TokenType_IDENTIFIER);
 
@@ -2558,27 +3093,19 @@ ConfigFunctionDef* ParseConfigFunction(Parser* parser,Arena* out){
 
   parser->ExpectNext('{');
 
-  auto stmts = PushList<ConfigStatement*>(temp);
-  while(!parser->Done()){
-    Token peek = parser->PeekToken();
-
-    if(peek.type == '}'){
-      break;
-    }
-        
-    ConfigStatement* config = ParseConfigStatement(parser,out);
-    *stmts->PushElem() = config;
-  }
-
+  ConfigStatement* config = ParseConfigStatements(parser,out);
+  
   parser->ExpectNext('}');
 
   ConfigFunctionDef* res = PushStruct<ConfigFunctionDef>(out);
   res->type = type;
   res->name = configName;
   res->variables = functionVars;
-  res->statements = PushArray(out,stmts);
+  res->stmts = config;
+  //res->statements = PushArray(out,stmts);
   res->debug = debug;
-
+  res->sim = sim;
+  
   return res;
 }
 
@@ -2587,22 +3114,19 @@ Array<Token> AccumTokens(MathExpression* top,Arena* out){
 
   auto AccumTokens = [](auto AccumTokens,MathExpression* top,ArenaList<Token>* list) -> void {
     switch(top->type){
-    case SpecType_LITERAL: break;
-    case SpecType_NAME: {
+    case MathType_LITERAL: break;
+    case MathType_NAME: {
       *list->PushElem() = top->name;
     } break;
-    case SpecType_VAR: {
-      *list->PushElem() = top->var.name;
+    case MathType_OPERATION: {
     } break;
-    case SpecType_OPERATION: {
-    } break;
-    case SpecType_SINGLE_ACCESS: {
+    case MathType_ACCESS: {
       *list->PushElem() = top->name;
     } break;
-    case SpecType_ARRAY_ACCESS: {
+    case MathType_ARRAY_ACCESS: {
       *list->PushElem() = top->name;
     } break;
-    case SpecType_FUNCTION_CALL: {
+    case MathType_FUNCTION_CALL: {
       *list->PushElem() = top->name;
     } break;
     }
@@ -2632,48 +3156,12 @@ void ArrayIndexIncrementInPlace(Array<int> dims,Array<int> startValue,Array<int>
   }
 }
 
-int ArrayIndexToInteger(Array<int> dims,Array<int> index){
-  Assert(dims.size == index.size);
-  int size = dims.size;
-
-  int res = 0;
-  for(int i = 0; i < size; i++){
-    int val = index[i];
-    for(int j = i + 1; j < size; j++){
-      val *= dims[j];
-    }
-
-    res += val;
-  }
-
-  return res;
-}
-
-Array<int> IntegerToArrayIndex(Array<int> dims,int index,Arena* out){
-  int size = dims.size;
-
-  Array<int> res = PushArray<int>(out,size);
-
-  int value = index;
-  for(int i = 0; i < index; i++){
-    int dimTotalSize = 1;
-    for(int j = i + 1; j < size; j++){
-      dimTotalSize *= dims[j];
-    }
-
-    res[i] = value / dimTotalSize;
-    value = value % dimTotalSize;
-  }
-
-  return res;
-}
-
-DimIterator* StartIteration(Array<int> dimensions,Array<int> startValues,Arena* out){
-  Assert(dimensions.size > 0);
+DimIterator* StartIteration(Array<int> endValues,Array<int> startValues,Arena* out){
+  Assert(endValues.size > 0);
 
   DimIterator* res = PushStruct<DimIterator>(out);
 
-  res->dim = CopyArray(dimensions,out);
+  res->endValues = CopyArray(endValues,out);
   res->startValue = CopyArray(startValues,out);
   res->current = CopyArray(startValues,out);
 
@@ -2683,11 +3171,11 @@ DimIterator* StartIteration(Array<int> dimensions,Array<int> startValues,Arena* 
 DimIterator* StartIteration(int size,Arena* out){
   DimIterator* res = PushStruct<DimIterator>(out);
   
-  res->dim = PushArray<int>(out,1);
+  res->endValues = PushArray<int>(out,1);
   res->startValue = PushArray<int>(out,1);
   res->current = PushArray<int>(out,1);
 
-  res->dim[0] = size;
+  res->endValues[0] = size;
 
   return res;
 }
@@ -2695,24 +3183,23 @@ DimIterator* StartIteration(int size,Arena* out){
 int DimIterator::Size(){
   int size = 1;
 
-  for(int i = 0; i < dim.size; i++){
-    size *= MAX(1,dim[i] - startValue[i]);
+  for(int i = 0; i < endValues.size; i++){
+    size *= MAX(1,endValues[i] - startValue[i]);
   }
 
   return size;
 }
 
 void DimIterator::Invalidate(){
-  current[0] = dim[0];
+  current[0] = endValues[0];
 }
 
-// MARK: Move to a better place
 void DimIterator::Advance(){
-  ArrayIndexIncrementInPlace(dim,startValue,current);
+  ArrayIndexIncrementInPlace(endValues,startValue,current);
 }
 
 bool DimIterator::IsValid(){
-  if(current[0] >= dim[0]){
+  if(current[0] >= endValues[0]){
     return false;
   }
  
@@ -2728,11 +3215,11 @@ VarIterator* StartIteration(Env* env,Var var,Arena* out){
 
   VarIterator* res = PushStruct<VarIterator>(out);
 
-  Entity* ent = env->GetEntity(var.name);
+  Entity ent = env->GetEntity(var.name);
 
   int expectedIndexSize = 0;
-  if(ent->type == EntityType_FU_ARRAY){
-    expectedIndexSize = ent->arrayDims.size;
+  if(ent.type == EntityType_FU_ARRAY){
+    expectedIndexSize = ent.dims.size;
   }
 
   res->name = var.name;
@@ -2750,6 +3237,7 @@ VarIterator* StartIteration(Env* env,Var var,Arena* out){
     auto start = env->ConvertRangeToStart(var.index,temp);
     auto end = env->ConvertRangeToEnd(var.index,temp);
 
+    // TODO-3
     for(int& i : end){
       i += 1;
     }
@@ -2759,7 +3247,7 @@ VarIterator* StartIteration(Env* env,Var var,Arena* out){
     res->arrayIndex = StartIteration(1,out);
   }
 
-  if(ent->type != EntityType_FU_ARRAY && var.index.size){
+  if(ent.type != EntityType_FU_ARRAY && var.index.size){
     env->ReportError({},"Error, var is not an array and does not support array subscriptions");
     res->Invalidate();
     return res;
@@ -2888,4 +3376,895 @@ Connection GroupIterator::Current(){
 
   Connection con = innerIters[currentIter]->Current();
   return con;
+}
+
+Entity MakeEntity(FUInstance* inst){
+  Entity res = Entity_Nil;
+  res.type = EntityType_FU;
+  res.inst = inst;
+  res.decl = inst->declaration;
+
+  // TODO-2
+  res.name = {};
+  res.name.type = TokenType_IDENTIFIER;
+  res.name.identifier = inst->name;
+  res.name.originalData = inst->name;
+
+  return res;
+}
+
+bool Nil(Entity ent){
+  bool res = (ent.type == EntityType_NIL);
+  return res;
+}
+
+
+
+
+
+
+
+
+
+// New parsing code in here ===================================================
+
+// ======================================
+// Type
+
+bool SP_Type_IsLoop(SP_Type in){
+  bool res = (in == SP_Type_GEN_LOOP ||
+              in == SP_Type_FOR_LOOP);
+  return res;
+}
+
+SP_Node* SP_PushNode(Arena* out,SP_Type type,Token token,SP_Node* childs){
+  SP_Node* node = PushStruct<SP_Node>(out);
+  node->type = type;
+  node->token = token;
+  node->childs = childs;
+  return node;
+}
+
+String SP_Repr(SP_Node* top,Arena* out){
+  TEMP_REGION(temp,out);
+
+  auto b = StartString(temp);
+
+  auto Recurse = [b](auto Recurse,SP_Node* node,int level) -> void {
+    if(!node){
+      return;
+    }
+
+    bool exprType = SP_Type_IsExpr(node->type);
+    bool isExprContainer = (node->type == SP_Type_EXPR);
+    String name = SP_Type_Name(node->type);
+    b->PushSpaces(level * 2);
+
+    if(isExprContainer){
+      b->PushString("N: %.*s ",UN(name));
+      if(!Empty(node->token.identifier)){
+        b->PushString("%.*s",UN(node->token.identifier));
+      }
+      b->PushString("\n");
+      
+      Recurse(Recurse,node->childs,level + 1);
+    } else if(exprType){
+      b->PushString("E: %.*s ",UN(name));
+      if(!Empty(node->token.identifier)){
+        b->PushString("%.*s",UN(node->token.identifier));
+      }
+      b->PushString("\n");
+
+      Recurse(Recurse,node->first,level + 1);
+      Recurse(Recurse,node->second,level + 1);
+    } else {
+      b->PushString("N: %.*s ",UN(name));
+      if(!Empty(node->token.identifier)){
+        b->PushString("%.*s",UN(node->token.identifier));
+      }
+      b->PushString("\n");
+
+      for(SP_Node* ptr = node->childs; ptr; ptr = ptr->next){
+        Recurse(Recurse,ptr,level + 1);
+      }
+    }
+  };
+
+  Recurse(Recurse,top,0);
+  String res = EndString(out,b);
+
+  return res;
+}
+
+SP_Node* SP_ParseExpressionInternal(Parser* parser,Arena* out,int bindingPower){
+  TEMP_REGION(temp,out);
+
+  SP_Node* bottomUnary = nullptr;
+  SP_Node* topUnary = nullptr;
+  
+  // Parse unaries that can repeat ==============================================
+  while(!parser->Done()){
+    SP_Node* parsed = nullptr;
+    if(!parsed && parser->IfNextToken('~')){
+      parsed = PushStruct<SP_Node>(out);
+      parsed->type = SP_Type_NOT;
+    }
+    if(!parsed && parser->IfNextToken('-')){
+      parsed = PushStruct<SP_Node>(out);
+      parsed->type = SP_Type_SUB;
+    }
+
+    if(parsed && !topUnary){
+      bottomUnary = parsed;
+      topUnary = parsed;
+      continue;
+    }
+
+    if(parsed){
+      parsed->first = topUnary;
+      continue;
+    }
+
+    break;
+  }
+
+  // Parse atom =================================================================
+  SP_Node* atom = nullptr;
+  Token peek = parser->PeekToken();
+
+  if(peek.type == '('){
+    parser->ExpectNext('(');
+
+    atom = SP_ParseExpressionInternal(parser,out,99);
+
+    parser->ExpectNext(')');
+  } else if(peek.type == TokenType_NUMBER){
+    Token number = parser->ExpectNext(TokenType_NUMBER);
+    atom = SP_PushNode(out,SP_Type_LITERAL,number,0);
+  } else if(peek.type == TokenType_IDENTIFIER){
+    Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+
+    SP_Node* var = SP_PushNode(out,SP_Type_VAR,name,0);
+
+    // TODO: Logic is not fully working, we cannot do something like: Var[].Func().
+    //
+
+    while(parser->IfNextToken('.')){
+      Token access = parser->ExpectNext(TokenType_IDENTIFIER);
+    
+      var = SP_PushNode(out,SP_Type_HIER_ACCESS,access,var);
+    }
+    
+    while(parser->IfNextToken('[')){
+      // MARK
+      SP_Node* expr = SP_ParseExpression(parser,out);
+      var->next = expr;
+      var = SP_PushNode(out,SP_Type_RANGE_ACCESS,{},var);
+
+      parser->ExpectNext(']');
+    }
+
+    // NOTE: Either we have a function or accesses, cannot have both.
+    bool isFunction = 0;
+    if(parser->IfNextToken('(')){
+      isFunction = 1;
+
+      SP_Node* argHead = 0;
+      SP_Node* argTail = 0;
+
+      while(!parser->Done()){
+        if(parser->IfPeekToken(')')){
+          break;
+        }
+
+        SP_Node* arg = SP_ParseExpressionInternal(parser,out,99);
+        SP_Append(argHead,argTail,arg);
+
+        if(parser->IfNextToken(',')){
+          continue;
+        }
+        
+        break;
+      }
+
+      parser->ExpectNext(')');
+
+      if(var->type == SP_Type_HIER_ACCESS){
+        // Var.Func()
+        SP_Node* innerVar = var->childs;
+
+        var->type = SP_Type_FUNC_CALL;
+        var->childs->next = argHead;
+      } else if(var->type == SP_Type_VAR){
+        // Func()
+        var->type = SP_Type_FUNC_CALL;
+        var->childs = argHead;
+      }
+    }
+
+    if(!isFunction){
+      if(parser->IfNextToken(':')){
+        SP_Node* port = SP_ParseRange(parser,out);
+    
+        var->next = port;
+        var = SP_PushNode(out,SP_Type_PORT_ACCESS,{},var);
+      }
+    }
+    
+    atom = var;
+  } else {
+    // TODO: Better error reporting
+    parser->ReportUnexpectedToken(parser->NextToken(),{});
+  }
+
+  if(topUnary){
+    bottomUnary->first = atom;
+    atom = topUnary;
+  }
+
+  struct OpInfo{
+    TokenType type;
+    int bindingPower;
+    SP_Type op;
+  };
+
+  // TODO: This should be outside the function itself.
+  auto infos = PushArray<OpInfo>(temp,11);
+
+  // TODO: Need to double check binding power
+  infos[0] = {TOK_TYPE('&'),0,SP_Type_AND};
+  infos[1] = {TOK_TYPE('|'),0,SP_Type_OR};
+  infos[2] = {TOK_TYPE('^'),0,SP_Type_XOR};
+
+  infos[3] = {TokenType_ROTATE_LEFT,1,SP_Type_RHL};
+  infos[4] = {TokenType_ROTATE_RIGHT,1,SP_Type_RHR};
+  infos[5] = {TokenType_SHIFT_LEFT,1,SP_Type_SHL};
+  infos[6] = {TokenType_SHIFT_RIGHT,1,SP_Type_SHR};
+
+  infos[7]  = {TOK_TYPE('*'),2,SP_Type_MUL};
+  infos[8] = {TOK_TYPE('/'),2,SP_Type_DIV};
+
+  infos[9] = {TOK_TYPE('+'),3,SP_Type_ADD};
+  infos[10] = {TOK_TYPE('-'),3,SP_Type_SUB};
+  
+  // Parse binary ops.
+  while(!parser->Done()){
+    Token peek = parser->PeekToken();
+
+    bool continueOuter = false;
+    for(OpInfo info : infos){
+      if(peek.type == info.type){
+        if(info.bindingPower < bindingPower){
+          parser->NextToken();
+
+          SP_Node* right = SP_ParseExpressionInternal(parser,out,info.bindingPower);
+      
+          SP_Node* op = SP_PushNode(out,info.op,{},0);
+          op->first = atom;
+          op->second = right;
+
+          atom = op;
+          continueOuter = true;
+          break;
+        }
+      }
+    }
+
+    if(continueOuter){
+      continue;
+    }
+
+    break;
+  }
+
+  return atom;
+}
+
+SP_Node* SP_ParseExpression(Parser* parser,Arena* out){
+  SP_Node* expr = SP_ParseExpressionInternal(parser,out,99);
+
+  SP_Node* res = SP_PushNode(out,SP_Type_EXPR,{},expr);
+  return res;
+}
+
+SP_Node* SP_ParseRange(Parser* parser,Arena* out){
+  SP_Node* first = SP_ParseExpressionInternal(parser,out,99);
+
+  SP_Node* second = first;
+  if(parser->IfNextToken(TokenType_DOUBLE_DOT)){
+    second = SP_ParseExpressionInternal(parser,out,99);
+  }
+
+  SP_Node* range = SP_PushNode(out,SP_Type_RANGE,{},0);
+  range->first = first;
+  range->second = second;
+
+  SP_Node* res = SP_PushNode(out,SP_Type_EXPR,{},range);
+  return res;
+}
+
+SP_Node* SP_ParseVar(Parser* parser,Arena* out){
+  Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+
+  SP_Node* var = SP_PushNode(out,SP_Type_VAR,name,0);
+
+  while(parser->IfNextToken('.')){
+    Token access = parser->ExpectNext(TokenType_IDENTIFIER);
+    
+    var = SP_PushNode(out,SP_Type_HIER_ACCESS,access,var);
+  }
+
+  while(parser->IfNextToken('[')){
+    SP_Node* range = SP_ParseRange(parser,out);
+
+    var->next = range;
+    var = SP_PushNode(out,SP_Type_RANGE_ACCESS,{},var);
+
+    parser->ExpectNext(']');
+  }
+
+#if 0
+  if(parser->IfNextToken('{')){
+    SP_Node* delay = SP_ParseRange(parser,out);
+    
+    var->next = delay;
+    var = SP_PushNode(out,SP_Type_DELAY_ACCESS,{},var);
+
+    parser->ExpectNext('}');
+  }
+#endif
+
+  if(parser->IfNextToken(':')){
+    SP_Node* port = SP_ParseRange(parser,out);
+    
+    var->next = port;
+    var = SP_PushNode(out,SP_Type_PORT_ACCESS,{},var);
+  }
+
+  return var;
+}
+
+SP_Node* SP_ParseVarDeclaration(Parser* parser,Arena* out){
+  Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+
+  SP_Node* var = SP_PushNode(out,SP_Type_VAR_DECL,name,0);
+  
+  while(parser->IfNextToken('[')){
+    SP_Node* range = SP_ParseRange(parser,out);
+
+    var->next = range;
+    var = SP_PushNode(out,SP_Type_RANGE_ACCESS,{},var);
+    
+    parser->ExpectNext(']');
+  }
+
+  return var;
+}
+
+SP_Node* SP_ParseModuleInputDeclaration(Parser* parser,Arena* out){
+  parser->ExpectNext('(');
+
+  SP_Node* head = 0;
+  SP_Node* tail = 0;
+  
+  while(!parser->Done()){
+    if(parser->IfPeekToken(')')){
+      break;
+    }
+
+    SP_Node* var = SP_ParseVarDeclaration(parser,out);
+    SP_Append(head,tail,var);
+    
+    if(parser->IfNextToken(',')){
+      continue;
+    } else {
+      break;
+    }
+  }
+
+  parser->ExpectNext(')');
+
+  SP_Node* res = SP_PushNode(out,SP_Type_MODULE_INPUTS,{},head);
+  return res;
+}
+
+SP_Node* SP_ParseInstanceDeclaration(Parser* parser,Arena* out){
+  SP_Node* head = 0;
+  SP_Node* tail = 0;
+
+  bool isVarGroup = 0;
+  while(1){
+    Token peek = parser->PeekToken();
+    
+    SP_Node* mod = 0;
+    if(peek.type == TokenType_KEYWORD_DEBUG){
+      parser->NextToken();
+      mod = SP_PushNode(out,SP_Type_MODIFIER_DEBUG,{},0);
+    }
+    if(peek.type == TokenType_KEYWORD_STATIC){
+      parser->NextToken();
+      mod = SP_PushNode(out,SP_Type_MODIFIER_STATIC,{},0);
+    }
+    if(peek.type == TokenType_KEYWORD_SHARE){
+      parser->NextToken();
+      parser->ExpectNext('(');
+      parser->ExpectNext(TokenType_KEYWORD_CONFIG);
+      parser->ExpectNext(')');
+
+      SP_Node* shareHead = 0;
+      SP_Node* shareTail = 0;
+      while(!parser->Done()){
+        if(parser->IfPeekToken(')')){
+          break;
+        }
+
+        Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+        SP_Node* node = SP_PushNode(out,SP_Type_VAR,name,0);
+        SP_Append(shareHead,shareTail,node);
+
+        if(parser->IfNextToken(',')){
+          continue;
+        } else {
+          break;
+        }
+      }
+      parser->ExpectNext(')');
+
+      mod = SP_PushNode(out,SP_Type_MODIFIER_SHARE,{},shareHead);
+      isVarGroup = 1;
+    }
+
+    if(mod){
+      SP_Append(head,tail,mod);
+      continue;
+    }
+
+    break;
+  }
+
+  Token typeName = parser->ExpectNext(TokenType_IDENTIFIER);
+
+  if(parser->IfNextToken('#')){
+    parser->ExpectNext('(');
+    while(!parser->Done()){
+      if(parser->IfPeekToken(')')){
+        break;
+      }
+
+      parser->ExpectNext('.');
+      Token parameterName = parser->ExpectNext(TokenType_IDENTIFIER);
+      parser->ExpectNext('(');
+      SP_Node* expr = SP_ParseExpression(parser,out);
+      parser->ExpectNext(')');
+
+      SP_Node* param = SP_PushNode(out,SP_Type_PARAM,parameterName,expr);
+      SP_Append(head,tail,param);
+
+      if(parser->IfNextToken(',')){
+        continue;
+      } else {
+        break;
+      }
+    }
+
+    parser->ExpectNext(')');
+  }
+
+  if(isVarGroup){
+    parser->ExpectNext('{');
+
+    while(!parser->Done()){
+      if(parser->IfPeekToken('}')){
+        break;
+      }
+    
+      SP_Node* varDecl = SP_ParseVarDeclaration(parser,out);
+      SP_Append(head,tail,varDecl);
+
+      parser->ExpectNext(';');
+    }
+
+    parser->ExpectNext('}');
+  } else {
+    SP_Node* decl = SP_ParseVarDeclaration(parser,out);
+    SP_Append(head,tail,decl);
+  }
+
+  SP_Node* res = SP_PushNode(out,SP_Type_VARIABLE_DECL,typeName,head);
+  return res;
+}
+
+SP_Node* SP_ParseVarGroup(Parser* parser,Arena* out){
+  SP_Node* varHead = 0;
+  SP_Node* varTail = 0;
+
+  if(parser->IfNextToken('{')){
+    while(!parser->Done()){
+      if(parser->IfPeekToken('}')){
+        break;
+      }
+      
+      SP_Node* var = SP_ParseVar(parser,out);
+      SP_Append(varHead,varTail,var);
+
+      if(parser->IfNextToken(',')){
+        continue;
+      }
+
+      break;
+    }
+    parser->ExpectNext('}');
+  } else {
+    varHead = SP_ParseVar(parser,out);
+  }
+
+  SP_Node* varGroup = SP_PushNode(out,SP_Type_VAR_GROUP,{},varHead);
+  return varGroup;
+}
+
+SP_Node* SP_ParseConnection(Parser* parser,Arena* out){
+  SP_Node* res = 0;
+
+  if(parser->IfNextToken(TokenType_KEYWORD_FOR)){
+    Token loopVar = parser->ExpectNext(TokenType_IDENTIFIER);
+
+    SP_Node* range = SP_ParseRange(parser,out);
+
+    parser->ExpectNext('{');
+
+    SP_Node* conHead = 0;
+    SP_Node* conTail = 0;
+    
+    while(!parser->Done()){
+      if(parser->IfPeekToken('}')){
+        break;
+      }
+
+      SP_Node* node = SP_ParseConnection(parser,out);
+      SP_Append(conHead,conTail,node);
+    }
+
+    parser->ExpectNext('}');
+    
+    range->next = conHead;
+
+    res = SP_PushNode(out,SP_Type_FOR_LOOP,loopVar,range);
+  } else {
+    SP_Node* outPart = SP_ParseVarGroup(parser,out);
+    
+    SP_Type type = SP_Type_NIL;
+    if(parser->IfNextToken('=')){
+      type = SP_Type_EQUALITY;
+    } else if(parser->IfNextToken(TokenType_ARROW)){
+      type = SP_Type_CONNECTION;
+    } else {
+      parser->ReportUnexpectedToken(parser->NextToken(),{TOK_TYPE('='),TokenType_ARROW});
+    }
+
+    SP_Node* inPart = {};
+
+    if(type == SP_Type_EQUALITY){
+      inPart = SP_ParseExpression(parser,out);
+    } else {
+      inPart = SP_ParseVarGroup(parser,out);
+    }
+
+    outPart->next = inPart;
+    res = SP_PushNode(out,type,{},outPart);
+  }
+
+  return res;
+}
+
+SP_Node* SP_ParseConfigStatements(Parser* parser,Arena* out){
+  SP_Node* stmtsHead = 0;
+  SP_Node* stmtsTail = 0;
+  
+  parser->ExpectNext('{');
+
+  while(!parser->Done()){
+    if(parser->IfPeekToken('}')){
+      break;
+    }
+    
+    bool isLoop = false;
+    bool isGen = false;
+    if(!isLoop && parser->IfNextToken(TokenType_KEYWORD_GEN)){
+      isLoop = true;
+      isGen = true;
+    }
+    if(!isLoop && parser->IfNextToken(TokenType_KEYWORD_FOR)){
+      isLoop = true;
+    }
+
+    if(isLoop){
+      Token loopVariable = parser->ExpectNext(TokenType_IDENTIFIER);
+
+      // TODO: Not being set, need to figure out how to proceed for this case
+      SP_Node* range = SP_ParseRange(parser,out);
+      SP_Node* childs = SP_ParseConfigStatements(parser,out);
+
+      SP_Type type = {};
+      if(isGen){
+        type = SP_Type_GEN_LOOP;
+      } else {
+        type = SP_Type_FOR_LOOP;
+      }
+
+      range->next = childs;
+      SP_Node* loopNode = SP_PushNode(out,type,loopVariable,range);
+      SP_Append(stmtsHead,stmtsTail,loopNode);
+    }
+    
+    if(!isLoop){
+      SP_Node* lhs = SP_ParseExpression(parser,out);
+
+      SP_Type type = {};
+      if(parser->IfNextToken('=')){
+        SP_Node* rhs = SP_ParseExpression(parser,out);
+        lhs->next = rhs;
+        parser->ExpectNext(';');
+        type = SP_Type_EQUALITY;
+      } else if(parser->IfNextToken(';')){
+        type = SP_Type_FUNCTION_CALL;
+      }
+
+      SP_Node* stmt = SP_PushNode(out,type,{},lhs);
+      SP_Append(stmtsHead,stmtsTail,stmt);
+    }
+  }
+  parser->ExpectNext('}');
+
+  SP_Node* res = SP_PushNode(out,SP_Type_STMT_LIST,{},stmtsHead);
+
+  return res;
+}
+
+SP_Node* SP_ParseConfigFunction(Parser* parser,Arena* out){
+  TEMP_REGION(temp,out);
+
+  SP_Node* head = 0;
+  SP_Node* tail = 0;
+
+  SP_Type type = SP_Type_NIL;
+  if(parser->IfNextToken(TokenType_KEYWORD_CONFIG)){
+    type = SP_Type_FUNC_CONFIG;
+  } else if(parser->IfNextToken(TokenType_KEYWORD_MEM)){
+    type = SP_Type_FUNC_MEM;
+  } else if(parser->IfNextToken(TokenType_KEYWORD_STATE)){
+    type = SP_Type_FUNC_STATE;
+  }
+
+  if(type == SP_Type_NIL){
+    return &SP_Node_Nil;
+  }
+
+  while(!parser->Done()){
+    if(parser->IfNextToken(TokenType_KEYWORD_DEBUG)){
+      SP_Node* mod = SP_PushNode(out,SP_Type_MODIFIER_DEBUG,{},0);
+      SP_Append(head,tail,mod);
+      continue;
+    } else if(parser->IfNextToken(TokenType_KEYWORD_SIM)){
+      SP_Node* mod = SP_PushNode(out,SP_Type_MODIFIER_SIM,{},0);
+      SP_Append(head,tail,mod);
+      continue;
+    }
+    
+    break;
+  }
+
+  Token funcName = parser->ExpectNext(TokenType_IDENTIFIER);
+
+  // Parse function inputs ======================================================
+  if(type == SP_Type_FUNC_MEM || type == SP_Type_FUNC_CONFIG){
+    parser->ExpectNext('(');
+  
+    while(!parser->Done()){
+      if(parser->IfPeekToken(')')){
+        break;
+      }
+
+      Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+
+      SP_Node* arraySize = 0;
+      if(parser->IfNextToken('[')){
+        arraySize = SP_ParseExpression(parser,out);
+        parser->ExpectNext(']');
+      }
+
+      SP_Type type = SP_Type_FUNC_TYPE_NONE;
+      if(parser->IfNextToken(':')){
+        Token typeName = parser->ExpectNext(TokenType_IDENTIFIER);
+        
+        if(typeName.identifier == "Buffer"){
+          type = SP_Type_FUNC_TYPE_BUFFER;
+        }
+        if(typeName.identifier == "Dyn"){
+          type = SP_Type_FUNC_TYPE_DYN;
+        }
+        if(typeName.identifier == "Fixed"){
+          type = SP_Type_FUNC_TYPE_FIXED;
+        }
+      }
+
+      SP_Node* var = SP_PushNode(out,type,name,arraySize);
+      SP_Append(head,tail,var);
+    
+      if(parser->IfNextToken(',')){
+        continue;
+      } else {
+        break;
+      }
+    }
+
+    parser->ExpectNext(')');
+  }
+
+  SP_Node* configs = SP_ParseConfigStatements(parser,out);
+  SP_Append(head,tail,configs);
+  
+  SP_Node* func = SP_PushNode(out,type,funcName,head);
+
+  return func;
+}
+
+SP_Node* SP_ParseModuleDef(Parser* parser,Arena* out){
+  parser->ExpectNext(TokenType_KEYWORD_MODULE);
+
+  Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+
+  SP_Node* head = 0;
+  SP_Node* tail = 0;
+
+  if(parser->IfNextToken('#')){
+    parser->ExpectNext('(');
+    
+    while(!parser->Done()){
+      if(parser->IfPeekToken(')')){
+        break;
+      }
+
+      Token name = parser->ExpectNext(TokenType_IDENTIFIER);
+
+      SP_Node* defaultVal = nullptr;
+      if(parser->IfNextToken('=')){
+        defaultVal = SP_ParseExpression(parser,out);
+      }  
+
+      SP_Node* param = SP_PushNode(out,SP_Type_PARAM_DECL,name,defaultVal);
+      SP_Append(head,tail,param);
+      
+      if(parser->IfNextToken(',')){
+        continue;
+      } else {
+        break;
+      }
+    }
+
+    parser->ExpectNext(')');
+  }
+
+  parser->ExpectNext('(');
+  
+  while(!parser->Done()){
+    if(parser->IfPeekToken(')')){
+      break;
+    }
+
+    SP_Node* var = SP_ParseVarDeclaration(parser,out);
+    var->type = SP_Type_INPUT_DECL;
+    SP_Append(head,tail,var);
+    
+    if(parser->IfNextToken(',')){
+      continue;
+    } else {
+      break;
+    }
+  }
+
+  parser->ExpectNext(')');
+
+  if(parser->IfNextToken(TokenType_ARROW)){
+    parser->ExpectNext(TokenType_NUMBER);
+  }
+
+  parser->ExpectNext('{');
+  int state = 0;
+  while(!parser->Done()){
+    // TODO: We currently ignore hashtag since we can just check the start of functions
+    parser->IfNextToken(TokenType_DOUBLE_HASHTAG);
+
+    if(parser->IfPeekToken('}')){
+      break;
+    }
+
+    if(state == 0){
+      if(parser->IfNextToken('#')){
+        state = 1;
+        continue;
+      }
+
+      // Parse variable declarations only ===========================================
+      SP_Node* var = SP_ParseInstanceDeclaration(parser,out);
+      SP_Append(head,tail,var);
+
+      parser->ExpectNext(';');
+
+    } else {
+      // Parser connections and function definitions ================================
+      
+      // TODO: We currently ignore hashtag since we can just check the start of functions
+      parser->IfNextToken(TokenType_DOUBLE_HASHTAG);
+      
+      Token peek = parser->PeekToken(0);
+      bool isFunction = 0;
+
+      if(peek.type == TokenType_KEYWORD_CONFIG ||
+         peek.type == TokenType_KEYWORD_STATE ||
+         peek.type == TokenType_KEYWORD_MEM){
+        isFunction = 1;
+      }
+
+      SP_Node* node = 0;
+      if(isFunction){
+        node = SP_ParseConfigFunction(parser,out);
+      } else {
+        node = SP_ParseConnection(parser,out);
+
+        parser->ExpectNext(';');
+      }
+
+      SP_Append(head,tail,node);
+    }
+  }
+
+  parser->ExpectNext('}');
+
+  SP_Node* res = SP_PushNode(out,SP_Type_MODULE_DECL,name,head);
+  return res;
+}
+
+// ======================================
+// Helpers
+
+SP_Node* SP_UnpackExpr(SP_Node* exprNode){
+  SP_Node* node = exprNode;
+  if(node->type == SP_Type_EXPR){
+    node = node->childs;
+  }
+
+  return node;
+}
+
+SP_NodeNode* SP_Flatten(SP_Node* top,Arena* out){
+  SP_NodeNode* head = 0;
+  SP_NodeNode* tail = 0;
+  
+  auto Recurse = [&](auto Recurse,SP_Node* node) -> void{
+    if(!node){
+      return;
+    }
+
+    SP_NodeNode* toAdd = PushStruct<SP_NodeNode>(out);
+    toAdd->node = node;
+    LL_Append(head,tail,next,toAdd);
+
+    bool exprType = SP_Type_IsExpr(node->type);
+    bool isExprContainer = (node->type == SP_Type_EXPR);
+
+    if(isExprContainer){
+      Recurse(Recurse,node->childs);
+    } else if(exprType){
+      Recurse(Recurse,node->first);
+      Recurse(Recurse,node->second);
+    } else {
+      for(SP_Node* ptr = node->childs; ptr; ptr = ptr->next){
+        Recurse(Recurse,ptr);
+      }
+    }
+  };
+
+  Recurse(Recurse,top);
+  
+  return head;
 }

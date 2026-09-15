@@ -11,7 +11,7 @@ struct SymbolicExpression;
 struct VExpr{
   const char* op;
   
-  // nocheckin: TODO: Should be a Token instead of just a string
+  // TODO: Should be a Token instead of just a string
   String id;
   Array<VExpr*> expressions;
   Value val;
@@ -70,6 +70,9 @@ inline bool operator==(Wire lhs,Wire rhs){
   bool res = (lhs.name == rhs.name);
   return res;
 }
+inline bool Equal(Wire lhs,Wire rhs){
+  return (lhs == rhs);
+}
 
 struct WireExpression{
   String name;
@@ -102,7 +105,6 @@ struct ExternalMemoryDualPortTemplate{ // dp
   T dataSizeOut;
 };
 
-typedef ExternalMemoryDualPortTemplate<int> ExternalMemoryDualPort;
 typedef ExternalMemoryDualPortTemplate<ExpressionRange> ExternalMemoryDualPortExpression;
 
 template<typename T>
@@ -112,9 +114,6 @@ struct ExternalMemoryTemplate{
 	ExternalMemoryDualPortTemplate<T> dp[2];
   };
 };
-
-typedef ExternalMemoryTemplate<int> ExternalMemory;
-typedef ExternalMemoryTemplate<ExpressionRange> ExternalMemoryExpression;
 
 // TODO: Do not know if it was better if this was a union. There are some differences that we currently ignore because we can always fill the interface with the information that we need. It's just that the code must take those into account, while the union approach would "simplify" somewhat the type system.
 template<typename T>
@@ -127,7 +126,6 @@ struct ExternalMemoryInterfaceTemplate : public ExternalMemoryTemplate<T>{
   int interface;
 };
 
-typedef ExternalMemoryInterfaceTemplate<int> ExternalMemoryInterface;
 typedef ExternalMemoryInterfaceTemplate<ExpressionRange> ExternalMemoryInterfaceExpression;
 typedef ExternalMemoryInterfaceTemplate<SYM_Expr> ExternalMemorySymbolic;
 
@@ -146,6 +144,9 @@ inline u64 Hash(ExternalMemoryID id){
 inline bool operator==(ExternalMemoryID lhs,ExternalMemoryID rhs){
   bool res = (memcmp(&lhs,&rhs,sizeof(ExternalMemoryID)) == 0);
   return res;
+}
+inline bool Equal(ExternalMemoryID lhs,ExternalMemoryID rhs){
+  return (lhs == rhs);
 }
 
 struct ExternalInfoTwoPorts : public ExternalMemoryTwoPortsExpression{

@@ -58,7 +58,7 @@ bool NodeConflict(FUInstance* first,FUInstance* second){
       SYM_Expr val1 = param1->GetOrFail(param.name);
       SYM_Expr val2 = param2->GetOrFail(param.name);
 
-      if(val1 != val2){
+      if(!Equal(val1,val2)){
         return true;
       }
     }
@@ -339,7 +339,7 @@ ConsolidationResult GenerateConsolidationGraph(Accelerator* accel0,Accelerator* 
   }
 #endif
 
-  auto nodes = StartArray<MappingNode>(out);
+  auto nodes = StartGrowableArray<MappingNode>(out);
   
 #if 1
   // Check possible edge mapping
@@ -797,13 +797,13 @@ GraphMapping ConsolidationGraphMapping(Accelerator* accel1,Accelerator* accel2,C
 
       InsertMapping(res,nodes.instances[1],nodes.instances[0]);
     } else { // Edge mapping
-         Edge& edge0 = node.edges[0]; // Edge in graph 1
-         Edge& edge1 = node.edges[1]; // Edge in graph 2
-
-         InsertMapping(res,edge1.units[0].inst,edge0.units[0].inst);
-         InsertMapping(res,edge1.units[1].inst,edge0.units[1].inst);
-
-         res.edgeMap->Insert(edge1,edge0);
+      Edge& edge0 = node.edges[0]; // Edge in graph 1
+      Edge& edge1 = node.edges[1]; // Edge in graph 2
+      
+      InsertMapping(res,edge1.units[0].inst,edge0.units[0].inst);
+      InsertMapping(res,edge1.units[1].inst,edge0.units[1].inst);
+      
+      res.edgeMap->Insert(edge1,edge0);
     }
   }
 
@@ -1303,7 +1303,7 @@ ReconstituteResult ReconstituteGraph(Accelerator* merged,TrieSet<PortInstance>* 
     seen->map->Clear();
     Array<Edge*> allPaths = GetAllPaths(merged,start,end,seen,temp);
     
-    auto allValidPathsDyn = StartArray<Edge*>(temp);
+    auto allValidPathsDyn = StartGrowableArray<Edge*>(temp);
     for(Edge* p : allPaths){
       //PrintPath(p);
       bool valid = true;
@@ -1667,7 +1667,7 @@ FUDeclaration* Merge(Array<FUDeclaration*> types,
   flattenToMergedAccel[0] = firstCopy.second;
   
   Array<Accelerator*> orderedAccelerators = [&](){
-    auto arr = StartArray<Accelerator*>(temp);
+    auto arr = StartGrowableArray<Accelerator*>(temp);
     bool first = true;
     for(Accelerator* accel : flatten){
       if(first){
@@ -1681,7 +1681,7 @@ FUDeclaration* Merge(Array<FUDeclaration*> types,
   }();
 
   Array<SpecificMergeNodes> specificNodes = [&](){
-    auto arr = StartArray<SpecificMergeNodes>(temp); // For now, only use specifics for two graphs.
+    auto arr = StartGrowableArray<SpecificMergeNodes>(temp); // For now, only use specifics for two graphs.
     for(SpecificMergeNode node : specifics){
       // For now this only works for two graphs
       FUInstance* left = GetInstanceByName(orderedAccelerators[node.firstIndex],node.firstName);
@@ -2134,7 +2134,7 @@ FUDeclaration* Merge(Array<FUDeclaration*> types,
   for(int i = 0; i < mergeSize; i++){
     BLOCK_REGION(temp);
 
-    auto childToTopArr = StartArray<int>(temp);
+    auto childToTopArr = StartGrowableArray<int>(temp);
     for(int j = validIndexes[i]; j != -1 ; j = parents[j]){
       *childToTopArr.PushElem() = j; 
     }
@@ -2212,7 +2212,7 @@ FUDeclaration* Merge(Array<FUDeclaration*> types,
     if(insertedAMultiplexer){
       Accelerator* rec = recon[i];
 
-      auto builder = StartArray<int>(temp);
+      auto builder = StartGrowableArray<int>(temp);
       for(FUInstance* inst : rec->allocated){
         if(inst->isMergeMultiplexer){
           *builder.PushElem() = inst->allInputs->port;
@@ -2368,7 +2368,7 @@ ReconstituteResult ReconstituteGraphFromStruct(Accelerator* merged,TrieSet<PortI
     seen->map->Clear();
     Array<Edge*> allPaths = GetAllPaths(merged,start,end,seen,temp);
 
-    auto allValidPathsDyn = StartArray<Edge*>(temp);
+    auto allValidPathsDyn = StartGrowableArray<Edge*>(temp);
     for(Edge* p : allPaths){
       bool valid = true;
       FOREACH_LIST(Edge*,edge,p){
@@ -2715,9 +2715,9 @@ FUDeclaration* Merge2(Array<FUDeclaration*> types,
       for(int i = 0; i < decl->parameters.size; i++){
         Parameter param = decl->parameters[i];
 
-        // nocheckin: TODO: Need to finish this and do it properly. 
-        //                  Also we might need to rethink our approach to merge and the best way of making sure that 
-        //                  parameters are properly handled.
+        // TODO: Need to finish this and do it properly. 
+        //       Also we might need to rethink our approach to merge and the best way of making sure that 
+        //       parameters are properly handled.
         if(param.flags & ParamFlags_Order){
           Opt<SYM_Expr> flatValOpt = flattenInst->parameterValues[i].val;
           Opt<SYM_Expr> mergeValOpt = mergedInst->parameterValues[i].val;
@@ -2772,7 +2772,7 @@ FUDeclaration* Merge2(Array<FUDeclaration*> types,
   DebugOutputGraphs(merged,"BeforeInsertingMux");
   
   // At this point we need to add the multiplexers
-  // Also assuming that we already removed all the superflouos edges (same node and input connected to same node and input edges can just be collapsed into one)
+  // Also assuming that we already removed all the superfluous edges (same node and input connected to same node and input edges can just be collapsed into one)
   for(FUInstance* inst : merged->mergedGraph->allocated){
     if(!inst->multipleSamePortInputs){
       continue;
@@ -2866,6 +2866,7 @@ FUDeclaration* Merge2(Array<FUDeclaration*> types,
   DebugOutputGraphs(merged,"AfterInsertingMux");
 
   FUDeclaration declInst = {};
+  declInst.type = FUDeclarationType_MERGED;
 
   // TODO: Kinda hacked approach to this
   declInst.parameters = PushArray<Parameter>(globalPermanent,6);
@@ -2958,8 +2959,6 @@ FUDeclaration* Merge2(Array<FUDeclaration*> types,
   decl->flattenedBaseCircuit = baseCopy.first; // Merged graph is already flattened.
   // TODO: We still need to look at the delay insertion step.
   decl->fixedDelayCircuit = mergedGraph;
-  
-  decl->type = FUDeclarationType_MERGED;
 
   FillDeclarationWithAcceleratorValues(decl,mergedGraph,globalPermanent,false);
   FillDeclarationWithDelayType(decl);

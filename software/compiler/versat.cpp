@@ -109,6 +109,7 @@ Opt<FUDeclaration*> RegisterModuleInfo(ModuleInfo* info,Arena* out){
   
 
   decl.name = info->name;
+  decl.type = FUDeclarationType_SINGLE;
 
   decl.info.infos = PushArray<MergePartition>(globalPermanent,1);
   decl.info.infos[0].inputDelays = Extract(info->inputs,out,&PortInfo::delay);
@@ -122,12 +123,12 @@ Opt<FUDeclaration*> RegisterModuleInfo(ModuleInfo* info,Arena* out){
 
   if(info->memoryMapped) {
     if(info->memoryMappedBits.high == nullptr || info->memoryMappedBits.low == nullptr){
-      decl.info.memMapBitsSym = SYM_Zero;
+      decl.info.memMapBitsSym = SYM_0;
     } else {
       SYM_Expr high = SymbolicExpressionFromVerilog(info->memoryMappedBits.high);
       SYM_Expr low = SymbolicExpressionFromVerilog(info->memoryMappedBits.low);
 
-      decl.info.memMapBitsSym = SYM_Normalize(high - low + SYM_One);
+      decl.info.memMapBitsSym = SYM_Normalize(high - low + SYM_1);
     }
   }
 
@@ -202,7 +203,7 @@ Opt<FUDeclaration*> RegisterModuleInfo(ModuleInfo* info,Arena* out){
     decl.supportedAddressGen.type = AddressGenType_MEM;
     decl.supportedAddressGen.loopsSupported = CountLoops(AddressGenMemExtraFormat);
   }
-
+  
   FUDeclaration* res = RegisterFU(decl);
 
   return res;
@@ -257,8 +258,8 @@ void FillDeclarationWithAcceleratorValues(FUDeclaration* decl,Accelerator* accel
     }
   }
     
-  // nocheckin : TODO: We have AccelInfo calculate this stuff meaning that we can just 
-  //                   get the data directly from there and remove this part. I think.
+  //  TODO: We have AccelInfo calculate this stuff meaning that we can just 
+  //        get the data directly from there and remove this part. I think.
   decl->configs = PushArray<Wire>(out,val.configs);
   decl->states = PushArray<Wire>(out,val.states);
 
@@ -364,21 +365,12 @@ FUDeclaration* RegisterSubUnit(Accelerator* circuit,Array<ParameterDef> params,S
   TEMP_REGION(temp2,temp);
 
   Arena* permanent = globalPermanent;
-
-  // We receive the circuit with all the instances. We also have any user provided param inside the instances themselves. The FUInstance contains the params.
-  // Any part of this code needs to instantiate everything that is a symbolic expression with those parameters, otherwise we run into trouble. And by everything I do mean everything.
-
-    // Disabled for now.
-#if 0
-  if(IsCombinatorial(circuit)){
-    circuit = Flatten(versat,circuit,99);
-  }
-#endif
   
   String name = circuit->name;
   FUDeclaration decl = {};
+  decl.type = FUDeclarationType_COMPOSITE;
+
   FUDeclaration* res = RegisterFU(decl);
-  res->type = FUDeclarationType_COMPOSITE;
   res->name = name;
 
   // Default parameters given to all modules. Parameters need a proper revision, but need to handle parameters going up in the hierarchy
@@ -739,7 +731,7 @@ Array<WireInformation> CalculateWireInformation(Pool<FUInstance> nodes,Hashmap<S
   
   auto list = PushList<WireInformation>(temp);
 
-  SYM_Expr expr = SYM_Zero;
+  SYM_Expr expr = SYM_0;
   
   int addr = addrOffset;
   for(auto n : nodes){

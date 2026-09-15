@@ -71,11 +71,20 @@ module AddressGen2 #(
       .iter3_i(0),
       .shift3_i(0),
 
+      .per4_i(0),
+      .incr4_i(0),
+      .iter4_i(0),
+      .shift4_i(0),
+
+      .work_i(0),
+      .workSize_i(0),
+
       .doneDatabus(),
       .doneAddress(),
 
       //outputs 
       .valid_o(valid_o),
+      .insideDuty_o(),
       .ready_i(ready_i),
       .addr_o (addr_o),
       .store_o(store_o),

@@ -12,6 +12,8 @@
 
 #define VERSAT_MAX(A,B) ((A) > (B) ? (A) : (B))
 #define VERSAT_ARRAY_SIZE(ARR) (sizeof(ARR) / sizeof(ARR[0]))
+#define VERSAT_FLOOR_DIV(A,B) ((A) / (B))
+#define VERSAT_WRAPPER(A) (A)
 
 typedef intptr_t iptr;
 
@@ -107,38 +109,7 @@ void             VersatPrintProfile(VersatProfile profile);
 // Their embedded counterparts simply do nothing
 void ConfigEnableDMA(bool value);
 void ConfigCreateVCD(bool value);
-void ConfigSimulateDatabus(bool value); 
-
-@{AddressStruct}
-
-// PC-Emul side function only that allow us to simulate what addresses a V unit would access, instead of having to run the accelerator and having to inspect the VCD file, we can simulate it at pc-emul.
-typedef struct{
-  int amountOfExternalValuesRead;
-  int amountOfInternalValuesUsed; // Repeated values are only counted once. The VRead is simulated in order to calculate this.
-} SimulateVReadResult;
-
-int SimulateAddressGen(iptr* arrayToFill,int arraySize,AddressVArguments args);
-SimulateVReadResult SimulateVRead(AddressVArguments args);
-void SimulateAndPrintAddressGen(AddressVArguments args);
-
-typedef struct{
-   int address;
-   int address2;
-   int address3;
-   int index;
-
-   int iter3,iter2,iter;
-   int per3,per2,per;
-   
-   AddressGenArguments* args;
-   bool finished;
-} VersatAddressSimState;
-
-VersatAddressSimState StartAddressSimulation(AddressGenArguments* args);
-int GetAddress(VersatAddressSimState* state);
-int GetIndex(VersatAddressSimState* state);
-void Advance(VersatAddressSimState* state);
-bool IsValid(VersatAddressSimState* state);
+void ConfigSimulateDatabus(bool value); // When disabled all vread/vwrites will not work.
 
 #ifdef __cplusplus
 } // extern "C"
@@ -203,6 +174,8 @@ static bool forceSingleLoop = false;
 
 #undef VERSAT_MAX
 #undef VERSAT_ARRAY_SIZE
+#undef VERSAT_FLOOR_DIV
+#undef VERSAT_WRAPPER
 
 #endif // INCLUDED_VERSAT_ACCELERATOR_HEADER
 

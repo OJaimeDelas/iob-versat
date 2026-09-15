@@ -4,9 +4,13 @@
 #include "globals.hpp"
 #include "versat.hpp"
 
+readonly FUDeclaration FUDeclaration_Nil = {};
+
 Pool<FUDeclaration> globalDeclarations;
 
 namespace BasicDeclaration{
+  FUDeclaration* nil = &FUDeclaration_Nil;
+
   FUDeclaration* variableBuffer;
   FUDeclaration* fixedBuffer;
   FUDeclaration* input;
@@ -22,35 +26,31 @@ static int zeros[99] = {};
 
 static FUDeclaration* RegisterCircuitInput(){
   FUDeclaration decl = {};
-
+  decl.type = FUDeclarationType_SINGLE;
   decl.name = "CircuitInput";
 
   decl.info.infos = PushArray<MergePartition>(globalPermanent,1);
   decl.info.infos[0].inputDelays = Array<int>{zeros,0};
   decl.info.infos[0].outputLatencies = Array<int>{zeros,1};
   
-  decl.type = FUDeclarationType_SPECIAL;
-  
   return RegisterFU(decl);
 }
 
 static FUDeclaration* RegisterCircuitOutput(){
   FUDeclaration decl = {};
-
+  decl.type = FUDeclarationType_SINGLE;
   decl.name = "CircuitOutput";
 
   decl.info.infos = PushArray<MergePartition>(globalPermanent,1);
   decl.info.infos[0].inputDelays = Array<int>{zeros,50};
   decl.info.infos[0].outputLatencies = Array<int>{zeros,0};
 
-  decl.type = FUDeclarationType_SPECIAL;
-
   return RegisterFU(decl);
 }
 
 static FUDeclaration* RegisterLiteral(){
   FUDeclaration decl = {};
-
+  decl.type = FUDeclarationType_SINGLE;
   decl.name = "Literal";
 
   decl.info.infos = PushArray<MergePartition>(globalPermanent,1);
@@ -78,6 +78,7 @@ static void RegisterOperators(){
                          {"SHL","{0} << {1}"}};
 
   FUDeclaration decl = {};
+  decl.type = FUDeclarationType_SINGLE;
   decl.isOperation = true;
 
   for(unsigned int i = 0; i < ARRAY_SIZE(unary); i++){
@@ -101,6 +102,20 @@ static void RegisterOperators(){
   }
 }
 
+bool IsNil(FUDeclaration* decl){
+  bool res = (decl && decl->type == FUDeclarationType_NIL);
+  return res;
+}
+
+FUDeclaration* RegisterFU(FUDeclaration decl){
+  Assert(decl.type != FUDeclarationType_NIL);
+  
+  FUDeclaration* type = globalDeclarations.Alloc();
+  *type = decl;
+
+  return type;
+}
+
 FUDeclaration* GetTypeByName(String name){
   for(FUDeclaration* decl : globalDeclarations){
     if(CompareString(decl->name,name)){
@@ -117,11 +132,12 @@ FUDeclaration* GetTypeByNameOrFail(String name){
   return decl;
 }
 
-FUDeclaration* RegisterFU(FUDeclaration decl){
-  FUDeclaration* type = globalDeclarations.Alloc();
-  *type = decl;
+FUDeclaration* GetTypeByName(String str,Array<ParamNameAndValue> params){
+  TEMP_REGION(temp,nullptr);
 
-  return type;
+  String mangledName = DECL_MangleName(str,params,temp);
+  FUDeclaration* res = GetTypeByName(mangledName);
+  return res;
 }
 
 void InitializeSimpleDeclarations(){
@@ -149,4 +165,41 @@ Wire* GetConfigWireByName(FUDeclaration* decl,String name){
   return nullptr;
 }
 
+String DECL_MangleName(String typeName,Array<ParamNameAndValue> params,Arena* out){
+  TEMP_REGION(temp,out);
+#if 1
+  return typeName;
+#else
+  Array<ParamNameAndValue> ordered = CopyArray(params,temp);
+  
+  for(int i = 0; i < ordered.size; i++){
+    for(int j = i + 1; j < ordered.size; j++){
+      if(CompareStringOrdered(ordered[i].name,ordered[j].name) > 0){
+        SWAP(ordered[i],ordered[j]);
+      }
+    }
+  }
 
+  auto b = StartString(temp);
+  b->PushString(typeName);
+
+  for(ParamNameAndValue val : ordered){
+    b->PushString("_");
+    b->PushString(val.name);
+    b->PushString("_");
+    b->PushString("%d",val.value);
+  }
+
+  String res = EndString(out,b);
+  return res;
+#endif
+}
+
+FUDeclaration* DECL_GetType(String name,Array<ParamNameAndValue> params){
+  FUDeclaration* res = GetTypeByName(name);
+  if(!res){
+    return &FUDeclaration_Nil;
+  }
+
+  return res;
+}

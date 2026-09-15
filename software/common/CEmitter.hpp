@@ -24,6 +24,7 @@ enum CASTType{
   CASTType_SWITCH_BLOCK,
   CASTType_CASE_BLOCK,
   CASTType_ELEM,
+  CASTType_SCOPE,
   CASTType_STATEMENT,
   CASTType_ASSIGNMENT
 };
@@ -38,6 +39,8 @@ struct CASTIf{
   ArenaList<CAST*>* statements;
 };
 
+// TODO: Having ArenaLists everywhere is kinda stupid. Should just be a simple Node with 
+//       list and tree next pointers and remove all this extra stuff for no reason.
 struct CAST{
   CASTType type;
 
@@ -57,6 +60,10 @@ struct CAST{
       ArenaList<CAST*>* elseStatements; // If nullptr then no else clause
     } ifDecl;
 
+    struct {
+      ArenaList<CAST*>* statements;
+    } scope;
+
     struct{
       String name;
       ArenaList<CAST*>* declarations;
@@ -65,7 +72,9 @@ struct CAST{
     struct{
       String type;
       String iterName;
-      String data;
+      String iterStart;
+      String iterCond;
+      String iterUpdate;
       ArenaList<CAST*>* statements;
     } foreachDecl;
     
@@ -149,7 +158,8 @@ struct CExpr{
 CAST* PushCAST(CASTType type,Arena* out);
 
 struct CEmitter{
-  Arena* arena;
+  Arena* castArena;
+  Arena* miscArena;
   CAST* topLevel;
   Array<CAST*> buffer;
   int top;  
@@ -182,13 +192,17 @@ struct CEmitter{
   
   void Extern(String typeName,String name);
 
+  void InsertCode(CAST* cast);
+
   // Only declares a function, no body
   void FunctionDeclOnlyBlock(String returnType,String functionName);
   
   void FunctionBlock(String returnType,String functionName);
-  void Argument(String type,String name);
+  void Argument(String type,String name,int arraySize = 0);
   
-  // TODO: Var block + Var element + EndBlock
+  void StartScope();
+  void EndScope();
+
   void VarDeclare(String type,String name,String initialValue = {});
   
   void ArrayDeclareBlock(String type,String name,bool isStatic = false);
@@ -199,7 +213,7 @@ struct CEmitter{
   void Elem(String value);
   void StringElem(String value);
 
-  void ForEachBlock(String type,String iterName,String data);
+  void ForEachBlock(String type,String iterName,String iterStart,String iterCond,String iterUpdate);
 
   void If(String expression);
   void ElseIf(String expression);
@@ -214,7 +228,7 @@ struct CEmitter{
   void IfFromExpression();
   void ElseIfFromExpression();
   void IfOrElseIfFromExpression();
-  
+
   void SwitchBlock(String switchExpr);
   void CaseBlock(String caseExpr);
   
@@ -236,11 +250,10 @@ struct CEmitter{
   void Return(String varToReturn = {});
 };
 
-CEmitter* StartCCode(Arena* freeArena);
+CEmitter* StartCCode(Arena* outputArena,Arena* freeArena);
 CAST* EndCCode(CEmitter* m);
 
 String PushASTRepr(CEmitter* e,Arena* out,bool cppStyle = false,int startLevel = 0);
 
 // TODO: cppStyle is just one styling choice, if we end up having more make a struct that is easier to pass around.
 void Repr(CAST* top,StringBuilder* b,bool cppStyle = false,int level = 0);
-

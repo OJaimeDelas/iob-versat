@@ -65,14 +65,14 @@ enum SpecialUnitType{
 //                  3) All the codeGeneration data is provided from InstanceInfo meaning that if something is 
 //                     miss calculated the problem is in here not in codeGeneration.cpp.
 
-// nocheckin - A bunch of members have different purposes and we are not keeping track of it.
-//             Some members are extracted directly from the inst so not important.
-//             Some members are symbolic expressions because they might depend on parameters and such.
-//             Some members are instantiation of symbolic expressions. These members only make sense 
-//               for the final AccelInfo, the one used to generate the Verilog/C code.
-//             Either we separate stuff into proper structures (which I do not like since I prefer to have
-//               every in the same place) or we divide the members into groups according to how they are used
-//               and put some comments explaining stuff.
+// TODO - A bunch of members have different purposes and we are not keeping track of it.
+//        Some members are extracted directly from the inst so not important.
+//        Some members are symbolic expressions because they might depend on parameters and such.
+//        Some members are instantiation of symbolic expressions. These members only make sense 
+//          for the final AccelInfo, the one used to generate the Verilog/C code.
+//        Either we separate stuff into proper structures (which I do not like since I prefer to have
+//          every in the same place) or we divide the members into groups according to how they are used
+//          and put some comments explaining stuff.
 struct InstanceInfo{
   int level;
   FUDeclaration* decl;
@@ -103,21 +103,17 @@ struct InstanceInfo{
   
   Array<ParamAndValue> params;
 
-  int isConfigStatic; // Static must be handle separately, for the top level accelerator. 
-
   bool isStatic;
   bool isGloballyStatic;
   
   bool isShared;
   int sharedIndex;
-  Array<bool> isSpecificConfigShared;
   
   Opt<int> statePos;
-
+  
+  // Nil if no mem map, 0 if mem mapped with no address bits and any positive number is the number of bits.
   SYM_Expr memMapSym;
-
-  // TODO: See if this is still useful. Need to reorganize stuff asap.
-  Opt<iptr> memMapped; // After parameter instantiation and this only makes sense for the top level.
+  iptr memMapped; // If memMapSym is non nil then this contains the start address
 
   int memGlobalIndex;
   int memSize;
@@ -150,14 +146,12 @@ struct InstanceInfo{
   FUInstance* inst; // Points to the recon instance for merge declarations.
   bool debug;
 
-  NodeType connectionType;
   Array<int> inputDelays;
   Array<int> outputLatencies;
   Array<int> portDelay;
   int partitionIndex; // TODO: What does this do? Probably a remnant from the old implementation.
 
   Array<SimplePortConnection> inputs; 
-  Array<SimplePortConnection> outputs;
 
   Array<SimplePortInstance> inputsDirectly;
   Array<bool> outputIsConnected;
@@ -352,8 +346,8 @@ Opt<Wire*> CONF_GetEnableWire(InstanceInfo* info); // Memory accessing units mig
 String GetStaticFullName(InstanceInfo* info,Arena* out);
 String GetStaticWireFullName(InstanceInfo* info,Wire wire,Arena* out);
 
-// nocheckin: Reorganize, must be to a better place.
+// TODO: Reorganize, must be to a better place.
 void InstantiateParameters(AccelInfo* info,Arena* temp);
 
-// nocheckin: Reorganize
+// TODO: Reorganize
 InstanceInfo* Find(AccelInfoIterator iter,HIER_Name hierarchicalNames);
