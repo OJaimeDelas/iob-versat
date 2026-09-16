@@ -129,7 +129,10 @@ clean-all: clean
 # DOCUMENT
 DOC_DIR:=$(VERSAT_DIR)/document
 
-doc-build:
+$(DOC_DIR)/tsrc/shortHash.tex:
+	git rev-parse --short HEAD > $@
+
+doc-build: $(DOC_DIR)/tsrc/shortHash.tex
 	make -C $(DOC_DIR) build
 
 doc-view:
@@ -141,9 +144,7 @@ doc-debug:
 doc-clean:
 	if [ -f "$(DOC_DIR)/Makefile" ]; then make -C $(DOC_DIR) clean; fi
 
-# Design Specification document (same sections as the User Guide, see
-# document/tsrc/ds.tex)
-ds-build:
+ds-build: $(DOC_DIR)/tsrc/shortHash.tex
 	make -C $(DOC_DIR) build DOC=ds
 
 ds-view:
@@ -151,7 +152,7 @@ ds-view:
 
 fst2saif: $(TOOL_BUILD_DIR)/fst2saif
 
-.PHONY: versat $(BUILD_DIR)/embeddedData.d doc-build doc-view doc-debug doc-clean ds-build ds-view fst2saif
+.PHONY: versat $(BUILD_DIR)/embeddedData.d $(DOC_DIR)/tsrc/shortHash.tex doc-build doc-view doc-debug doc-clean ds-build ds-view fst2saif
 
 .SUFFIXES:
 

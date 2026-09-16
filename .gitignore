@@ -12,6 +12,7 @@ TAGS
 compile_flags.txt
 
 software/compiler/*_meta.hpp
+document/tsrc/shortHash.tex
 
 # document/ build artifacts (see document/Makefile)
 document/*.tex

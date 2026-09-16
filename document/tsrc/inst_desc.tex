@@ -13,11 +13,11 @@ instantiating the template \texttt{software/\allowbreak templates/\allowbreak ve
 placeholder below is substituted at code-generation time, for example
 \texttt{@\{typeName\}} with the top-level module's name.
 
-\lstinputlisting[language=C,firstline=47,lastline=68,caption={\texttt{software/templates/versat\_header.tpl} (lines 47--68): run-control API declared in every generated \texttt{versat\_accel.h}.},label={lst:versat_header}]{../software/templates/versat_header.tpl}
+\lstinputlisting[language=C,firstline=49,lastline=70,caption={\texttt{software/templates/versat\_header.tpl} (lines 49--70): run-control API declared in every generated \texttt{versat\_accel.h}.},label={lst:versat_header}]{../software/templates/versat_header.tpl}
 
 Each generated header also declares two pointers, substituting \texttt{@\{typeName\}} for the top-level module's name:
 
-\lstinputlisting[language=C,firstline=176,lastline=177,caption={\texttt{software/templates/versat\_header.tpl} (lines 176--177): the per-accelerator Config and State accessors.}]{../software/templates/versat_header.tpl}
+\lstinputlisting[language=C,firstline=147,lastline=148,caption={\texttt{software/templates/versat\_header.tpl} (lines 147--148): the per-accelerator Config and State accessors.}]{../software/templates/versat_header.tpl}
 
 Putting this together with the \texttt{SimpleExample} module of
 Listing~\ref{lst:simple_example} (Section~\ref{sec:versat_spec}): its

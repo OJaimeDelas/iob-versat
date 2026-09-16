@@ -8,14 +8,14 @@ Versat only generates an accelerator's Verilog and software, as shown in Section
 
 \begin{lstlisting}[caption={iob\_versat.py}]
 CreateVersatClass(versat_spec, versat_top, versat_extra, build_dir,
-                  axi_data_w, debug_path=None, profile=None)
+                  axi_data_w, debug_path=None, profile=None, extraFlags=None)
 \end{lstlisting}
 
 It takes the specification file, the top-level unit name, an optional extra units folder, the SoC build directory, and the AXI data width. It then:
 
 \begin{itemize}
   \itemsep-0.5em
-  \item runs the \texttt{versat} executable found on \texttt{PATH}, not \texttt{./versat}, so the repository root, where \texttt{make -j versat} places the binary, must be on \texttt{PATH}. It always passes \texttt{-{}-debug}, \texttt{-d} to enable the DMA, \texttt{-b} set to the AXI data width, \texttt{-t} set to the top-level unit, \texttt{-o <build\_dir>/hardware/src}, and \texttt{-O <build\_dir>/software}, and adds \texttt{-u}, \texttt{-g}, and \texttt{-{}-profile} when \texttt{versat\_extra}, \texttt{debug\_path}, and \texttt{profile} are given;
+  \item runs the \texttt{versat} executable found on \texttt{PATH}, not \texttt{./versat}, so the repository root, where \texttt{make -j versat} places the binary, must be on \texttt{PATH}. It always passes \texttt{-{}-debug}, \texttt{-d} to enable the DMA, \texttt{-b} set to the AXI data width, \texttt{-t} set to the top-level unit, \texttt{-o <build\_dir>/hardware/src}, and \texttt{-O <build\_dir>/software}, and adds \texttt{-u}, \texttt{-g}, and \texttt{-{}-profile} when \texttt{versat\_extra}, \texttt{debug\_path}, and \texttt{profile} are given; \texttt{extraFlags}, when given, is appended verbatim as one final raw argument to the \texttt{versat} invocation;
   \item saves Versat's output to \texttt{<build\_dir>/software/versatSetup.txt} and, whenever that file exists, reuses it instead of running Versat again, so the file must be deleted for a changed specification to take effect;
   \item reads the \texttt{ADDR\_W} line of that output and declares a \texttt{MAX\_CONFIG} register near the top of that address range, so that the SoC reserves the accelerator's whole address space;
   \item returns an \texttt{iob\_versat} class with clock, clock-enable, and reset signals and an IOb native CPU interface. Because the DMA enabled by \texttt{-d} always counts as a databus user, Versat always reports \texttt{HAS\_AXI}, so the class also always declares the \texttt{USE\_EXTMEM} configuration and an AXI master port that connects the accelerator directly to external memory.
