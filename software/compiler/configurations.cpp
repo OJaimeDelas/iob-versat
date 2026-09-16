@@ -189,7 +189,7 @@ AccelInfoIterator StartIteration(AccelInfo* info,int mergeIndex){
 }
 
 Array<InstanceInfo*> GetAllSameLevelUnits(AccelInfo* info,int level,int mergeIndex,Arena* out){
-  auto builder = StartArray<InstanceInfo*>(out);
+  auto builder = StartGrowableArray<InstanceInfo*>(out);
 
   AccelInfoIterator iter = StartIteration(info,mergeIndex);
 
@@ -234,7 +234,7 @@ String GetEntityMemName(InstanceInfo* info,Arena* out){
 Array<Pair<String,int>> ExtractMem(Array<InstanceInfo> info,Arena* out){
   int count = 0;
   for(InstanceInfo& in : info){
-    if(!in.isComposite && !SYM_IsZeroValue(in.memMapSym)){
+    if(!in.isComposite && !SYM_IsNil(in.memMapSym)){
       count += 1;
     }
   }
@@ -242,16 +242,16 @@ Array<Pair<String,int>> ExtractMem(Array<InstanceInfo> info,Arena* out){
   Array<Pair<String,int>> res = PushArray<Pair<String,int>>(out,count);
   int index = 0;
   for(InstanceInfo& in : info){
-    if(!in.isComposite && !SYM_IsZeroValue(in.memMapSym)){
+    if(!in.isComposite && !SYM_IsNil(in.memMapSym)){
       String name = GetEntityMemName(&in,out); 
-      res[index++] = {name,(int) in.memMapped.value()};
+      res[index++] = {name,(int) in.memMapped};
     }
   }
 
   return res;
 }
 
-// nocheck: Remove this, we already have a function that does this.
+// TODO: Remove this, we already have a function that does this.
 String ReprStaticConfig(StaticId id,Wire* wire,Arena* out){
   String identifier = PushString(out,"%.*s_%.*s_%.*s",UN(id.parent->name),UN(id.name),UN(wire->name));
 
@@ -277,7 +277,7 @@ static bool Next(Array<Partition> arr){
 }
 
 Array<Partition> GenerateInitialPartitions(Accelerator* accel,Arena* out){
-  auto partitionsArr = StartArray<Partition>(out);
+  auto partitionsArr = StartGrowableArray<Partition>(out);
   int mergedPossibility = 0;
   for(FUInstance* node : accel->allocated){
     FUDeclaration* decl = node->declaration;
@@ -358,7 +358,7 @@ String GetName(Array<Partition> partitions,Arena* out){
   return EndString(out,builder);
 }
 
-// nocheckin
+// TODO: Check if we can remove or move to someplace else
 bool IsGlobalParameter(String name);
 
 // TODO: Move this function to a better place
@@ -394,7 +394,6 @@ Array<InstanceInfo> GenerateInitialInstanceInfo(Accelerator* accel,Arena* out,Ar
     elem->debug = inst->debug;
     elem->isGloballyStatic = inst->isStatic;
     elem->isShared = inst->sharedEnable;
-    elem->isSpecificConfigShared = inst->isSpecificConfigShared;
     elem->sharedIndex = inst->sharedIndex;
     elem->isMergeMultiplexer = inst->isMergeMultiplexer;
     elem->special = inst->literal;
@@ -402,7 +401,6 @@ Array<InstanceInfo> GenerateInitialInstanceInfo(Accelerator* accel,Arena* out,Ar
     elem->id = inst->id;
     elem->inputDelays = decl->GetInputDelays();
     elem->outputLatencies = decl->GetOutputLatencies();
-    elem->connectionType = inst->type;
     elem->partitionIndex = 0;
     elem->individualWiresShared = inst->isSpecificConfigShared;
     elem->numberDelays = decl->NumberDelays();
@@ -486,12 +484,12 @@ Array<InstanceInfo> GenerateInitialInstanceInfo(Accelerator* accel,Arena* out,Ar
     }
   };
   
-  auto build = StartArray<InstanceInfo>(out);
+  auto build = StartGrowableArray<InstanceInfo>(out);
   Function(Function,build,accel,0,partitions,out);
   Array<InstanceInfo> res = EndArray(build);
 
-  // nocheckin - Look at this code and the InstantiateParameters functions and reorganize/cleanup this part.
-  //             A lot of "duplicated" code could potentially be removed.
+  // TODO - Look at this code and the InstantiateParameters functions and reorganize/cleanup this part.
+  //        A lot of "duplicated" code could potentially be removed.
 
   // We instantiate parameters in here.
   AccelInfo info;
@@ -558,9 +556,7 @@ Array<InstanceInfo> GenerateInitialInstanceInfo(Accelerator* accel,Arena* out,Ar
     for(Wire& w : info->states){
       w.sizeExpr = SYM_Replace(w.sizeExpr,map);
     }
-    if(!SYM_IsZeroValue(info->memMapSym)){
-      info->memMapSym = SYM_Replace(info->memMapSym,map);
-    }
+    info->memMapSym = SYM_Replace(info->memMapSym,map);
     for(int i = 0; i < info->externalMemory.size; i++){
       info->externalMemory[i] = Replace(info->externalMemory[i],map);
     }
@@ -593,9 +589,7 @@ Array<InstanceInfo> GenerateInitialInstanceInfo(Accelerator* accel,Arena* out,Ar
     for(Wire& w : info->states){
       w.sizeExpr = SYM_Replace(w.sizeExpr,map);
     }
-    if(!SYM_IsZeroValue(info->memMapSym)){
-      info->memMapSym = SYM_Replace(info->memMapSym,map);
-    }
+    info->memMapSym = SYM_Replace(info->memMapSym,map);
     for(int i = 0; i < info->externalMemory.size; i++){
       info->externalMemory[i] = Replace(info->externalMemory[i],map);
     }
@@ -649,7 +643,7 @@ Array<InstanceInfo> GenerateInitialInstanceInfo(Accelerator* accel,Arena* out,Ar
         portInst->port = ptr->port;
       }
 
-      info->outputs = PushArray(out,list);
+      //info->outputs = PushArray(out,list);
     }
     
     info->outputIsConnected = CopyArray(inst->outputs,out);
@@ -925,13 +919,13 @@ void FillInstanceInfo(AccelInfoIterator initialIter,Arena* out){
 
   CalculateState(CalculateState,initialIter,0);
   
-  // nocheckin - Maybe slower than needed and 
+  // TODO - Maybe slower than needed and 
   {
     int memGlobalIndex = 0;
     for(auto iter = initialIter; iter.IsValid(); iter = iter.Step()){
       InstanceInfo* info = iter.CurrentUnit();
 
-      if(!SYM_IsZeroValue(info->memMapSym) && !info->isComposite){
+      if(!SYM_IsNil(info->memMapSym) && !info->isComposite){
         info->memGlobalIndex = memGlobalIndex++;
         info->memSize = 1;
       }
@@ -954,6 +948,9 @@ void FillInstanceInfo(AccelInfoIterator initialIter,Arena* out){
         
         firstIndex = MIN(child->memGlobalIndex,firstIndex);
         size += child->memSize;
+      }
+      if(firstIndex == 9999999){
+        firstIndex = 0;
       }
 
       info->memGlobalIndex = firstIndex;
@@ -985,12 +982,22 @@ void FillInstanceInfo(AccelInfoIterator initialIter,Arena* out){
         return;
       }
 
-      SYM_Expr maximum = SYM_Zero;
-
+      SYM_Expr maximum = SYM_0;
+      bool allNil = true;
       for(AccelInfoIterator it = iter.StepInsideOnly(); it.IsValid(); it = it.Next()){
         InstanceInfo* unit = it.CurrentUnit();
-
-        maximum = SYM_PosMax(maximum,unit->memMapSym);
+        
+        SYM_Expr unitExpr = unit->memMapSym;
+        if(SYM_IsNil(unitExpr)){
+          unitExpr = SYM_0;
+        } else {
+          allNil = false;
+        }
+        
+        maximum = SYM_PosMax(maximum,unitExpr);
+      }
+      if(allNil){
+        maximum = SYM_Nil;
       }
 
       unit->memMapSym = maximum;
@@ -1184,12 +1191,24 @@ void FillAccelInfoFromCalculatedInstanceInfo(AccelInfo* info,Accelerator* accel)
 
   TrieSet<int>* configsSeen = PushTrieSet<int>(temp);
 
-  SYM_Expr maximum = SYM_Zero;
+  SYM_Expr maximum = SYM_0;
+  bool allNil = true;
   for(AccelInfoIterator it = StartIteration(info); it.IsValid(); it = it.Next()){
     InstanceInfo* unit = it.CurrentUnit();
 
-    maximum = SYM_PosMax(maximum,unit->memMapSym);
+    SYM_Expr unitExpr = unit->memMapSym;
+    if(SYM_IsNil(unitExpr)){
+      unitExpr = SYM_0;
+    } else {
+      allNil = false;
+    }
+
+    maximum = SYM_PosMax(maximum,unitExpr);
   }
+  if(allNil){
+    maximum = SYM_Nil;
+  }
+
   info->memMapBitsSym = maximum;
 
   for(AccelInfoIterator iter = StartIteration(info) ;iter.IsValid(); iter = iter.Next()){
@@ -1210,7 +1229,7 @@ void FillAccelInfoFromCalculatedInstanceInfo(AccelInfo* info,Accelerator* accel)
     FUInstance* inst = ptr;
     FUDeclaration* type = inst->declaration;
     
-    if(!SYM_IsZeroValue(type->info.memMapBitsSym)){
+    if(!SYM_IsNil(type->info.memMapBitsSym)){
       info->isMemoryMapped = true;
 
       unitsMapped += 1;
@@ -1259,7 +1278,7 @@ void FillAccelInfoFromCalculatedInstanceInfo(AccelInfo* info,Accelerator* accel)
   //       or if it is only needed by the top accelerator.
   //       For now we calculate it to make easier to debug by inspecting the data.
   //       But need to take another look eventually
-  SYM_Expr staticExpr = SYM_Zero;
+  SYM_Expr staticExpr = SYM_0;
   for(FUInstance* ptr : accel->allocated){
     FUInstance* inst = ptr;
     if(inst->isStatic){
@@ -1434,7 +1453,7 @@ Opt<SYM_Expr> GetParameterValue(InstanceInfo* info,String name){
     }
   }
 
-  return SYM_Zero;
+  return SYM_0;
 }
 
 bool IsUnitCombinatorialOperation(InstanceInfo* info){
@@ -1501,9 +1520,7 @@ void InstantiateParameters(AccelInfo* info,Arena* out){
       for(Wire& w : topUnit->states){
         w.sizeExpr = SYM_Replace(w.sizeExpr,map);
       }
-      if(!SYM_IsZeroValue(topUnit->memMapSym)){
-        topUnit->memMapSym = SYM_Replace(topUnit->memMapSym,map);
-      }
+      topUnit->memMapSym = SYM_Replace(topUnit->memMapSym,map);
       for(int i = 0; i <  topUnit->externalMemory.size; i++){
         topUnit->externalMemory[i] = Replace(topUnit->externalMemory[i],map);
       }
@@ -1524,9 +1541,7 @@ void InstantiateParameters(AccelInfo* info,Arena* out){
           w.sizeExpr = SYM_Replace(w.sizeExpr,map);
         }
 
-        if(!SYM_IsZeroValue(subUnit->memMapSym)){
-          subUnit->memMapSym = SYM_Replace(subUnit->memMapSym,map);
-        }
+        subUnit->memMapSym = SYM_Replace(subUnit->memMapSym,map);
 
         for(int i = 0; i <  subUnit->externalMemory.size; i++){
           subUnit->externalMemory[i] = Replace(subUnit->externalMemory[i],map);
@@ -1614,9 +1629,7 @@ void InstantiateParameters(AccelInfo* info,Arena* out){
       }
 #endif
 
-      if(!SYM_IsZeroValue(info->memMapSym)){
-        info->memMapSym = SYM_Replace(info->memMapSym,map);
-      }
+      info->memMapSym = SYM_Replace(info->memMapSym,map);
     }    
   }
 

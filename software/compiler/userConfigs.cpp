@@ -11,6 +11,9 @@
 
 #include "CEmitter.hpp"
 #include "versatSpecificationParser.hpp"
+#include "templateEngine.hpp"
+
+readonly ConfigFunction ConfigFunction_Nil = {};
 
 // ============================================================================
 // Instantiation and manipulation
@@ -20,150 +23,173 @@ static String GlobalConfigFunctionName(String functionName,FUDeclaration* decl,A
   return name;
 }
 
-struct ParseResult{
-  bool isArray;
-  bool isFunctionInvoc;
-  bool containsAccess;
-  bool isExpr;
-  
-  SYM_Expr expr;
-  Array<SpecExpression*> args;
-  Token entityName;
-  Token wireName; 
-  Token functionName;
-};
-
 struct DecompConfigStatement{
   // Single type
   bool isFunctionInvoc;
+  ConfigFunction* func;
 
   // LHS type
-  bool isVirtualWire;
-  bool isSingleWire;
-  bool isEntityOnly;
-  bool isLeftSideArray;
+  struct {
+    Entity entity; // Always contains the "bigger" entity (FUs and such).
+    Entity subEntity; // Contains the smaller entity (wires and such).
+
+    String name;
+  } lhs;
   
   // RHS type
-  bool isExprOnly;
-  bool isArrayExpr;
-  bool isHierAccess;
+  struct {
+    bool isHierAccess;
+    bool isArray;
+    bool isExpr;
 
-  bool isArray;
-  bool isExpr;
+    Entity entity;
+    Entity subEntity; 
 
-  Entity* parentEntity;
-  Entity* subEntity;
-
-  SYM_Expr expr;
-  Array<MathExpression*> args;
-  Token entityName;
-  Token wireName; 
-
-  ConfigFunction* func;
+    // TODO: I think that this has to go. Entity + SubEntity is enough to provide all the info needed to user.
+    SYM_Expr expr;
+  } rhs;
 };
 
+// TODO: While I think this was worthwhile, it is also not a good way of doing things. We started by 
+//       trying to make the code generic instead of just doing the work that we actually need and then
+//       compressing it back into a single portion.
+
+// NOTE: For now we will keep this approach but eventually I want to remove this and do the proper logic in 
+//       config state and mem portions; 
 DecompConfigStatement DecomposeConfigStatement(Env* env,ConfigStatement* stmt,Arena* out){
   DecompConfigStatement res = {};
+
+  // TODO: While we currently do not support it, we could technically add:
+  //       Multiple access expressions: a.b.c.d.e actually resolving to something (currently we do not support this).
+
+  // TODO: Since the majority of the logic is specific to a certain size and format of the access, we could add more
+  //       robust error checking and reporting.
+
+  Array<Entity> lhs = env->GetEntity(stmt->lhs,out);
+
+  Entity lhsFirst = Entity_Nil;
+  Entity lhsSecondLast = Entity_Nil;
+  Entity lhsLast = Entity_Nil;
+
+  if(lhs.size >= 1){
+    lhsFirst = lhs[0];
+    lhsLast = lhs[lhs.size - 1];
+  }
+  if(lhs.size >= 2){
+    lhsSecondLast = lhs[lhs.size - 2];
+  }
   
-  Assert(stmt->type != ConfigStatementType_FOR_LOOP);
+  Assert(!IsLoop(stmt->type));
   if(stmt->type == ConfigStatementType_FUNCTION_CALL){
     res.isFunctionInvoc = true;
-    
-    EntityAndLeftoverAccess ent = env->GetEntity(stmt->lhs,out);
- 
-    // User error or program error?
-    // nocheckin - Try to force this.
-    Assert(!ent.leftover);
-   
-    res.func = ent.ent->func;
-    res.args = stmt->lhs->next->arguments;
+    res.func = lhsLast.func;
+    res.lhs.name = lhsFirst.name.identifier;
   }
+
   if(stmt->type == ConfigStatementType_EQUALITY){
     // Left hand side
-    EntityAndLeftoverAccess lhs = env->GetEntity(stmt->lhs,out);
+    res.lhs.name = lhsFirst.name.identifier;
 
-    res.parentEntity = lhs.ent;
-    res.subEntity = nullptr;
+    FULL_SWITCH(lhsLast.type){
+    case EntityType_NIL:{
+      // Nothing
+      Assert(false);
+    } break;
 
-    if(IsEntitySubType(lhs.ent->type)){
-      Assert(lhs.ent->parent);
+    case EntityType_RUNTIME_COMPUTATION:
+    case EntityType_VARIABLE_SPECIAL:
+    case EntityType_VARIABLE_INPUT:
+    case EntityType_FUNCTION:
+    case EntityType_GEN_VALUE:
+    case EntityType_PARAM:
+    case EntityType_SYM:
+    case EntityType_FU_ARRAY:{
+      // TODO: Should be user error, right?
+      //Assert(false);
+    } break;
 
-      res.parentEntity = lhs.ent->parent;
-      res.subEntity = lhs.ent;
-    }
-
-    if(res.subEntity && res.subEntity->type == EntityType_MEM_PORT){
-      // Statement of the form mem.in0 = val
-      // This can only be an expression on the other side.
-      res.isVirtualWire = true;
-
-      // User error or program error?
-      // nocheckin - Try to force this.
-      Assert(!lhs.leftover);
-    } else if(res.subEntity){
-      // Statement of the form ent.wire = val
-      res.isSingleWire = true;
-
-      // User error or program error?
-      // nocheckin - Try to force this.
-      Assert(!lhs.leftover);
-    } else {
-      res.isEntityOnly = true;
-    }
-
-    res.isLeftSideArray = (lhs.leftover != nullptr);
+    case EntityType_FU:{
+      res.lhs.name = lhsLast.name.identifier;
+      res.lhs.entity = lhsLast;
+    } break;
+    case EntityType_ACCESS_EXPR:{
+      res.lhs.entity = lhsSecondLast;
+      res.lhs.subEntity = lhsLast;
+    } break;
+    case EntityType_MEM_PORT:{
+      res.lhs.entity = lhsSecondLast;
+      res.lhs.subEntity = lhsLast;
+    } break;
+    case EntityType_CONFIG_WIRE:
+    case EntityType_STATE_WIRE:{
+      res.lhs.entity = lhsSecondLast;
+      res.lhs.subEntity = lhsLast;
+    } break;
+  }
 
     // Right hand side
     MathExpression* rhs = stmt->rhs;
-    if(rhs->type == SpecType_ARRAY_ACCESS){
-      // Statement of the form x = addr[expr]
-      // This almost always implies a VUnit access 
-      res.isArray = true;
-      res.expr = env->SymbolicFromMathExpression(rhs->expressions[0]);
-      res.entityName = rhs->name;
-    } else if(rhs->type == SpecType_SINGLE_ACCESS){
+    Array<Entity> rhsDecomp = env->GetEntity(rhs,out);
+
+    Entity rhsFirst = Entity_Nil;
+    Entity rhsLast = Entity_Nil;
+
+    if(rhsDecomp.size >= 1){
+      rhsFirst = rhsDecomp[0];
+    }
+    if(rhsDecomp.size >= 2){
+      rhsLast = rhsDecomp[rhsDecomp.size - 1];
+    }
+
+    res.rhs.entity = rhsFirst;
+    res.rhs.subEntity = rhsLast;
+
+    bool found = false;
+    
+    // TODO: The access expr stuff is really weird. 
+    if(!found && rhsFirst.type == EntityType_ACCESS_EXPR){
+      // TODO: Do not even know if we can reach this.
+      found = true;
+      res.rhs.isArray = true;
+      res.rhs.entity = rhsFirst;
+      res.rhs.expr = rhsFirst.sym;
+    } 
+    if(!found && rhsFirst.type == EntityType_FU && rhsLast.type == EntityType_ACCESS_EXPR){
+      found = true;
+      res.rhs.isArray = true;
+    }
+    if(!found && rhsFirst.type == EntityType_VARIABLE_INPUT && rhsLast.type == EntityType_ACCESS_EXPR){
+      found = true;
+      res.rhs.isArray = true;
+      res.rhs.entity = rhsFirst;
+      res.rhs.subEntity = rhsLast;
+    }
+
+    if(!found && rhsFirst.type == EntityType_FU
+       && (rhsLast.type == EntityType_CONFIG_WIRE || 
+           rhsLast.type == EntityType_STATE_WIRE)){
       // Statement of the form x = ent.wire
       // This is mostly state statements
-      res.isHierAccess = true;
-      res.entityName = rhs->name;
-      res.wireName = rhs->expressions[0]->name;
-    } else {    
-      // Only expressions remain as valid statements
-      res.isExpr = true;
-      res.expr = env->SymbolicFromMathExpression(rhs);
+      found = true;
+      res.rhs.entity = rhsFirst;
+      res.rhs.subEntity = rhsLast;
+      res.rhs.isHierAccess = true;
     }
+
+    if(!found && rhsFirst.type == EntityType_SYM){
+      found = true;
+      res.rhs.isExpr = true;
+      res.rhs.entity = rhsFirst;
+      res.rhs.expr = rhsFirst.sym;
+    }
+
+    if(rhsLast.type == EntityType_ACCESS_EXPR){
+      res.rhs.expr = rhsLast.sym;
+    }
+
+    //Assert(found);
   }
   
-  return res;
-}
-
-// TODO: We could do better. We could have a decompose ConfigStatement
-ParseResult ParseRHS(Env* env,MathExpression* top,Arena* out){
-/*
-  RHS can be:
-
-  wire           'name.wire'
-  addrExpr       'addr[expr]'
-  expression     'expr'
-*/
-
-  // TODO: We still need to access env to check if this makes sense or not.
-  //       nocheckin
-
-  ParseResult res = {};
-  if(top->type == SpecType_ARRAY_ACCESS){
-    res.isArray = true;
-    res.expr = env->SymbolicFromMathExpression(top->expressions[0]);
-    res.entityName = top->name;
-  } else if(top->type == SpecType_SINGLE_ACCESS){
-    res.containsAccess = true;
-    res.entityName = top->name;
-    res.wireName = top->expressions[0]->name;
-  } else {    
-    res.isExpr = true;
-    res.expr = env->SymbolicFromMathExpression(top);
-  }
-
   return res;
 }
 
@@ -178,24 +204,32 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
   Array<ConfigVarDeclaration> variables = def->variables;
   Array<Token> variableNames = Extract(variables,temp,&ConfigVarDeclaration::name);
 
-  env->PushScope();
+  String stateStructContent = {};
 
-  for(Token name : variableNames){
-    env->AddVariable(name);
+  env->PushScope(EnvScopeType_FUNCTION);
+
+  for(ConfigVarDeclaration varDecl : variables){
+    EntityVarFlags flags = {};
+    // TODO: Proper
+    if(varDecl.type.identifier == "Buffer"){
+      flags = EntityVarFlags_ADDRESS;
+    }
+
+    env->AddVariable(varDecl.name,varDecl.arraySize,flags);
   }
   
   // TODO: This flow is not good. With a bit more work we probably can join state and config into the same flow or at least avoid duplicating work. For now we are mostly prototyping so gonna keep pushing what we have.
+  // NOTE: We probably can join mem and config together. 
 
   // Break apart every for loop + statement into individual statements.
   // NOTE: Kinda slow but should not be a problem anytime soon.
-  TrieMap<ConfigStatement*,ConfigStatement*>* nodeToParent = PushTrieMap<ConfigStatement*,ConfigStatement*>(temp);
   auto simpleStmtList = PushList<ConfigStatement*>(temp);
 
-  auto Recurse = [nodeToParent,simpleStmtList](auto Recurse,ConfigStatement* top) -> void{
-    if(top->type == ConfigStatementType_FOR_LOOP){
-      for(ConfigStatement* child : top->childs){
-        nodeToParent->Insert(child,top);
-        Recurse(Recurse,child);
+  auto Recurse = [simpleStmtList](auto Recurse,ConfigStatement* top) -> void{
+    if(IsLoop(top->type)){
+      for(ConfigStatement* ptr = top->child; ptr; ptr = ptr->next){
+        ptr->parent = top;
+        Recurse(Recurse,ptr);
       }
     }
     if(IsLeaf(top->type)){
@@ -203,10 +237,13 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
     }
   };
 
-  for(ConfigStatement* top : def->statements){
-    Recurse(Recurse,top);
+  for(ConfigStatement* ptr = def->stmts; ptr; ptr = ptr->next){
+    Recurse(Recurse,ptr);
   }
 
+  // Separate all statements into individuals. Each array contains all the loops that affect
+  // the single leaf statement.
+  // Every N sized array is composed of N-1 FOR_LOOP types and 1 STATEMENT type.
   auto stmtList = PushList<Array<ConfigStatement*>>(temp);
   for(ConfigStatement* stmt : simpleStmtList){
     auto list = PushList<ConfigStatement*>(temp);
@@ -214,28 +251,36 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
     ConfigStatement* ptr = stmt;
     while(ptr){
       *list->PushElem() = ptr;
-
-      ConfigStatement** possibleParent = nodeToParent->Get(ptr);
-      ConfigStatement* parent = possibleParent ? *possibleParent : nullptr;
-
-      ptr = parent;
+      ptr = ptr->parent;
     }
 
     Array<ConfigStatement*> asArray = PushArray(temp,list);
     ReverseInPlace(asArray);
     *stmtList->PushElem() = asArray;
   }
-
-  // From this point on use this. Every N sized array is composed of N-1 FOR_LOOP types and 1 STATEMENT type.
-  // TODO: Remember, after pushing every statement into an individual loop, we need to do error checking and check if the variable still exists. We cannot do variable checking globally since some statements might not be inside one of the loops.
   Array<Array<ConfigStatement*>> individualStatements = PushArray(temp,stmtList);
+
+  // TODO: Remember, after pushing every statement into an individual loop, we need to do error checking and check if the variable still exists. We cannot do variable checking globally since some statements might not be inside one of the loops.
+
+  // Pass all gen loops to outer loops.
+  for(Array<ConfigStatement*>& individual : individualStatements){
+    for(int i = 0; i < individual.size; i++){
+      for(int j = 0; j < individual.size - 1; j++){
+        if(   individual[j]->type == ConfigStatementType_FOR_LOOP
+           && individual[j+1]->type == ConfigStatementType_GEN_LOOP){
+          
+          SWAP(individual[j],individual[j+1]);
+        }
+      }
+    }
+  }
 
   // TODO: Kinda stupid calculating things this way but the rest of the code needs to collapse into a simpler form for the more robust approach first.
   auto variablesUsedOnLoopExpressions = PushTrieSet<String>(temp);
 
   for(Array<ConfigStatement*> arr : individualStatements){
     for(ConfigStatement* conf : arr){
-      if(conf->type != ConfigStatementType_FOR_LOOP){
+      if(!IsLoop(conf->type)){
         continue;
       }
 
@@ -267,8 +312,8 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
 
     ConfigVarType type = ConfigVarType_SIMPLE;
 
-    if(typeTok.identifier == "Address"){
-      type = ConfigVarType_ADDRESS;
+    if(typeTok.identifier == "Buffer"){
+      type = ConfigVarType_BUFFER;
     } else if(typeTok.identifier == "Fixed"){
       type = ConfigVarType_FIXED;
     } else if(typeTok.identifier == "Dyn"){
@@ -280,6 +325,10 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
     
     varInfo[i].type = type;
     varInfo[i].name = PushString(out,decl.name.identifier);
+    
+    if(decl.arraySize){
+      varInfo[i].arraySize = env->CalculateConstantExpression(decl.arraySize);
+    }
 
     varNames[i] = varInfo[i].name;
   }
@@ -300,216 +349,649 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
     type = ConfigFunctionType_CONFIG;
 
     for(Array<ConfigStatement*> stmts : individualStatements){
-      ConfigStatement* simple = stmts[stmts.size - 1];
-      // TODO: Call entity function to make sure that the entity exists and it is a config wire
+      // Collect all gen loops into an "iterator" structures.
+      // Iterate over that structure setting the gen variables to the expected value.
 
-      String lhsName = GetBase(simple->lhs)->name.identifier;
-      
-      auto forLoops = PushList<AddressGenForDef>(temp);
-
+      // Separate loops for easier processing
+      auto genList = PushList<AddressGenForDef>(temp);
       for(int i = 0; i < stmts.size - 1; i++){
-        *forLoops->PushElem() = stmts[i]->def;
+        if(stmts[i]->type == ConfigStatementType_GEN_LOOP){
+          *genList->PushElem() = stmts[i]->def;
+        }
+      }
+      Array<AddressGenForDef> genLoops = PushArray(temp,genList);
+
+      auto forList = PushList<AddressGenForDef>(temp);
+      for(int i = 0; i < stmts.size - 1; i++){
+        if(stmts[i]->type == ConfigStatementType_FOR_LOOP){
+          *forList->PushElem() = stmts[i]->def;
+        }
+      }
+      Array<AddressGenForDef> forLoops = PushArray(temp,forList);
+
+      ConfigStatement* simple = stmts[stmts.size - 1];
+
+      // Setup gen loop state
+      struct GenLoopState{
+        Token name;
+        int val;
+        int start;
+        int end;
+      };
+      Array<GenLoopState> genState = PushArray<GenLoopState>(temp,genLoops.size);
+
+      // We are now inside the gen loops scope.
+      env->PushScope(EnvScopeType_FOR_LOOP);
+      for(int i = 0; i <  genLoops.size; i++){
+        AddressGenForDef gen = genLoops[i];
+
+        genState[i].name = gen.loopVariable;
+        genState[i].start = env->CalculateConstantExpression(gen.startSym);
+        genState[i].end = env->CalculateConstantExpression(gen.endSym);
+        genState[i].val = genState[i].start;
+
+        env->SetGenVariable(gen.loopVariable,genState[i].start);
       }
 
-      Array<AddressGenForDef> loops = PushArray(temp,forLoops);
+      for(AddressGenForDef loop : forLoops){
+        env->AddVariable(loop.loopVariable);
+      }
 
-      DecompConfigStatement decomp = DecomposeConfigStatement(env,simple,temp);
+      while(1){
+        // Register current loop variables on environment
+        for(int i = 0; i <  genLoops.size; i++){
+          GenLoopState gen = genState[i];
 
-      // TODO: We can clear this code even further.
-      Entity* ent = decomp.parentEntity; //env->GetEntity(simple->lhs,temp);
-      Entity* wireEnt = decomp.subEntity;
-      Entity* portEnt = decomp.subEntity;
-
-      // Function invocation is basically argument instantiation and replacing the 
-      // statements with the new version.
-      if(decomp.isFunctionInvoc){
-        Array<MathExpression*> args = decomp.args;
-        ConfigFunction* function = decomp.func;
-
-        // TODO: Not an assert, should be a proper error
-        Assert(function->type == ConfigFunctionType_CONFIG);
-
-        if(!function){
-          // TODO: Error
-          printf("Error 2, function does not exist, make sure the name is correct\n");
-          exit(-1);
-          return nullptr;
+          env->SetGenVariable(gen.name,gen.val);
         }
 
-        if(args.size != function->variables.size){
-          printf("Error 2.1, number of arguments does not match\n");
-          exit(-1);
-          return nullptr;
+        bool isLhsWireAccess = false;
+        bool isLhsWireVirtual = false;
+        bool isLhsFunctionCall = false;
+        IGNORE_UNUSED bool lhsError = false;
+
+        Entity lhsBase = Entity_Nil;
+        Entity lhsSub = Entity_Nil;
+        Array<MathExpression*> funcArgs = {};
+
+        // Decompose lhs side =========================================================
+        {
+          bool nameAlreadySeen = false;
+
+          ConfigIdentifier* ptr = simple->lhs;
+          
+          for(; ptr; ptr = ptr->next){
+            FULL_SWITCH(ptr->type){
+            case ConfigIdentifierType_BASE:{
+              // Parser should never allow this
+              Assert(!nameAlreadySeen);
+
+              lhsBase = env->GetEntity(ptr->name);
+              nameAlreadySeen = true;
+            } break;
+            case ConfigIdentifierType_ARRAY:{
+              if(!Nil(lhsSub)){
+                env->ReportError(lhsBase.name,"Cannot have array access expressions at this point");
+                lhsError = true;
+              }
+
+              if(isLhsFunctionCall){
+                env->ReportError({},"Cannot have array access after a function expression");
+                lhsError = true;
+              }
+
+              MathExpression* expr = ptr->arrayExpr;
+
+              bool found = false;
+              if(!found && lhsBase.type == EntityType_FU_ARRAY){
+                found = true;
+        
+                int index = env->CalculateConstantExpression(expr);
+        
+                if(index < 0 || index >= lhsBase.dims[0]){
+                  env->ReportError({},"Outside array bounds");
+                  lhsError = true;
+                }
+
+                String arrayName = PushString(out,"%.*s_%d",UN(lhsBase.name.identifier),index);
+        
+                Array<int> newDims = Offset(lhsBase.dims,1);
+
+                if(newDims.size > 0){
+                  lhsBase.type = EntityType_FU_ARRAY;
+          
+                  // TODO-2
+                  lhsBase.name = {};
+                  lhsBase.name.type = TokenType_IDENTIFIER;
+                  lhsBase.name.identifier = arrayName;
+                  lhsBase.name.originalData = arrayName;
+
+                  lhsBase.dims = newDims;
+                } else {
+                  FUInstance** possibleInst = env->table->Get(arrayName);
+
+                  if(!possibleInst){
+                    //ReportError({},"Inst does not exist");
+                  } else {
+                    lhsBase = MakeEntity(*possibleInst);
+                  }
+                }
+              }
+
+              if(!found){
+                env->ReportError(lhsBase.name,"Did not find entity referenced by this");
+                lhsError = true;
+              }
+            } break;
+            case ConfigIdentifierType_ACCESS:{
+              isLhsWireAccess = true;
+
+              Token accessName = ptr->name;
+
+              if(lhsBase.type != EntityType_FU){
+                env->ReportError(accessName,"Trying to access entity that does not support member access");
+              }
+
+              if(lhsBase.type == EntityType_FU){
+                lhsSub = env->GetEntityFromAccess(lhsBase,accessName);
+
+                if(Nil(lhsSub)){
+                  env->ReportError(accessName,"Not found");
+                  lhsError = true;
+                }
+              }
+              
+              isLhsWireVirtual = (lhsSub.type == EntityType_MEM_PORT);
+            } break;
+            case ConfigIdentifierType_FUNC_CALL:{
+              isLhsFunctionCall = true;
+
+              Token funcName = ptr->functionName;
+              FUDeclaration* decl = lhsBase.decl;
+
+              bool found = false;
+              for(MergePartition part : decl->info.infos){
+                for(ConfigFunction* func : part.userFunctions){
+                  if(func->individualName == funcName.identifier){
+                    lhsSub.type = EntityType_FUNCTION;
+                    lhsSub.func = func;
+            
+                    if(found){
+                      // TODO-1
+                      env->ReportError(funcName,"Multiple functions with same name detected\n");
+                      lhsError = true;
+                    }
+                    found = true;
+                  }
+                }
+              }
+              
+              if(found){
+                funcArgs = ptr->arguments;
+              }
+            } break;
+          }
+          }
         }
-      
-        // Invocation var to function argument
-        TrieMap<String,SYM_Expr>* argToVar = PushTrieMap<String,SYM_Expr>(temp);
-        for(int i = 0; i <  args.size; i++){
-          // Arg is in the function space
-          ConfigVariable arg = function->variables[i];
 
-          SYM_Expr var = env->SymbolicFromMathExpression(args[i]);
+        bool isRhsArrayAccess = false; // Entire thing is A[...];
+        bool isRhsExpressionOnly = false; // Is only a mathematical expression.
+        
+        Entity rhsEntity = Entity_Nil;
+        SYM_Expr rhsExpr = SYM_Nil;
+        IGNORE_UNUSED bool rhsError = false;
 
-          // TODO: Kinda stupid.
-          Array<String> vars = SYM_GetAllVariables(var,temp);
-          if(arg.usedOnLoopExpressions){
-            for(String s : vars){
-              variablesUsedOnLoopExpressions->Insert(s);
+        // Decompose rhs side =========================================================
+        if(!isLhsFunctionCall){
+          MathExpression* ptr = simple->rhs;
+          
+          FULL_SWITCH(ptr->type){
+          case MathType_FUNCTION_CALL:
+          case MathType_NAME:
+          case MathType_LITERAL:
+          case MathType_OPERATION: {
+            rhsExpr = env->SymbolicFromMathExpression(ptr);
+            isRhsExpressionOnly = true;
+          } break;
+
+          // We do not support accesses on rhs of config functions ====================
+          case MathType_ACCESS: {
+            rhsError = true;
+            Assert(false);
+          } break;
+
+          // Array accesses only supports constant expressions (for now) ================
+          case MathType_ARRAY_ACCESS: {
+            isRhsArrayAccess = true;
+
+            rhsEntity = env->GetEntity(ptr->name);
+
+            for(int i = 0; i < ptr->expressions.size; i++){
+              MathExpression* expr = ptr->expressions[i];
+
+              FULL_SWITCH(expr->type){
+              case MathType_FUNCTION_CALL: 
+              case MathType_NAME:
+              case MathType_LITERAL:
+              case MathType_OPERATION:{
+                SYM_Expr asSym = env->SymbolicFromMathExpression(expr);
+                SYM_EvaluateResult res = SYM_ConstantEvaluate(asSym);
+                
+                if(res.divByZero){
+                  printf("Division by zero while trying to calculate array index\n");
+                  rhsError = true;
+                }
+
+                int val = res.result;
+                bool isExpressionConstant = !res.nonConstantValue;
+                bool found = false;
+                bool isExpression = false;
+                Entity newEntity = Entity_Nil;
+                
+                if(!found && !rhsError){
+                  bool isVarInput = rhsEntity.type == EntityType_VARIABLE_INPUT;
+                  bool isAddress = (rhsEntity.flags & EntityVarFlags_ADDRESS);
+                  bool isArray = rhsEntity.arrayDims > 0;
+
+                  bool isVarInputAddressable = (isVarInput && isAddress && isArray);
+
+                  if(!found && isExpressionConstant && isVarInputAddressable){
+                    found = true;
+                    String trueName = PushString(temp,"%.*s[%d]",UN(rhsEntity.name.identifier),val);
+                    newEntity.type = EntityType_VARIABLE_INPUT;
+                    newEntity.name.identifier = trueName;
+                    newEntity.flags = rhsEntity.flags;
+                    newEntity.arrayDims = rhsEntity.arrayDims - 1;
+                  }
+
+                  if(!found && (!isExpressionConstant || !isVarInputAddressable)){
+                    if(!SYM_IsNil(rhsExpr)){
+                      rhsError = true;
+                    }
+                    isExpression = true;
+                    rhsExpr = asSym;
+                  }
+                }
+
+                if(!found && !isExpression){
+                  rhsError = true;
+                }
+
+                if(found){
+                  rhsEntity = newEntity;
+                }
+              } break;
+              case MathType_ACCESS:
+              case MathType_ARRAY_ACCESS: {
+                rhsError = true;
+                //Assert(false);
+              } break;
+
             }
+            }
+          } break;
+        }
+        }
+
+        String lhsName = lhsBase.name.identifier;
+
+        if(rhsError){
+          printf("\n\n\nRHS decomp failed\n\n\n");
+        }
+          
+        // Function invocation is basically argument instantiation and replacing the 
+        // statements with the new version.
+        if(isLhsFunctionCall){
+          Array<MathExpression*> args = funcArgs;
+          ConfigFunction* function = lhsSub.func;
+
+          // TODO: Not an assert, should be a proper error
+          Assert(function->type == ConfigFunctionType_CONFIG);
+
+          if(!function){
+            // TODO: Error
+            printf("Error 2, function does not exist, make sure the name is correct\n");
+            exit(-1);
+            return nullptr;
           }
 
-          argToVar->Insert(arg.name,var);
-        }
+          if(args.size != function->variables.size){
+            printf("Error 2.1, number of arguments does not match\n");
+            exit(-1);
+            return nullptr;
+          }
       
-        for(ConfigStuff stuff : function->stuff){
-          // TODO: We are building the struct access expression in here but I got a feeling that we probably want to preserve data as much as possible in order to tackle merge later on.
-          FULL_SWITCH(stuff.type){
-          case ConfigStuffType_ASSIGNMENT:{
-            String lhs = PushString(out,"%.*s.%.*s",UN(lhsName),UN(stuff.assign.lhs));
+          // Invocation var to function argument
+          TrieMap<String,SYM_Expr>* argToVar = PushTrieMap<String,SYM_Expr>(temp);
+          for(int i = 0; i <  args.size; i++){
+            // Arg is in the function space
+            ConfigVariable arg = function->variables[i];
+
+            SYM_Expr var = env->SymbolicFromMathExpression(args[i]);
+
+            // TODO: Kinda stupid.
+            Array<String> vars = SYM_GetAllVariables(var,temp);
+            if(arg.usedOnLoopExpressions){
+              for(String s : vars){
+                variablesUsedOnLoopExpressions->Insert(s);
+              }
+            }
+
+            argToVar->Insert(arg.name,var);
+          }
+      
+          for(ConfigStuff stuff : function->stuff){
+            // TODO: We are building the struct access expression in here but I got a feeling that we probably want to preserve data as much as possible in order to tackle merge later on.
+            FULL_SWITCH(stuff.type){
+            case ConfigStuffType_ASSIGNMENT:{
+              String lhs = PushString(out,"%.*s.%.*s",UN(lhsName),UN(stuff.assign.lhs));
         
-            SYM_Expr rhs = stuff.assign.rhs;
-            SYM_Expr newExpr = SYM_Replace(rhs,argToVar);
+              SYM_Expr rhs = stuff.assign.rhs;
+              SYM_Expr newExpr = SYM_Replace(rhs,argToVar);
         
-            ConfigStuff* newAssign = list->PushElem();
-            newAssign->type = ConfigStuffType_ASSIGNMENT;
-            newAssign->assign.lhs = lhs;
-            newAssign->assign.rhs = newExpr;
-          } break;
-          case ConfigStuffType_ADDRESS_GEN:{
-            AccessAndType access = stuff.access;
+              ConfigStuff* newAssign = list->PushElem();
+              newAssign->type = ConfigStuffType_ASSIGNMENT;
+              newAssign->assign.lhs = lhs;
+              newAssign->assign.rhs = newExpr;
+            } break;
+            case ConfigStuffType_ADDRESS_GEN:{
+              AccessAndType access = stuff.access;
 
-            ConfigStuff* newAccess = list->PushElem();
-            newAccess->type = ConfigStuffType_ADDRESS_GEN;
+              ConfigStuff* newAccess = list->PushElem();
+              newAccess->type = ConfigStuffType_ADDRESS_GEN;
 
-            // TODO: By doing stuff this way we do not allow expressions inside functions.
-            //       We cannot have ent.func(expr + expr) for example since we assume that the expression
-            //       inside is just simple substitution.
-            newAccess->access = access;
-            newAccess->access.access = ReplaceVariables(access.access,argToVar,varNames,out);
-            newAccess->lhs = lhsName + stuff.lhs;
-          } break;
-          case ConfigStuffType_MEMORY_TRANSFER:{
-            // We should never have memory transfers at config functions, right?
-            NOT_IMPLEMENTED();
-          } break;
+              // TODO: By doing stuff this way we do not allow expressions inside functions.
+              //       We cannot have ent.func(expr + expr) for example since we assume that the expression
+              //       inside is just simple substitution.
+              // NOTE: Probably the best way of fixing is to treat hierarchies as simple substitutions.
+              //       If we could replace a function call with the statements that the function implies
+              //       then we could just compile those and the logic would remain simple.
+              //       If we can compile a single statement and we can flatten the functions then
+              //       we could compile anything.
+              
+              newAccess->access = access;
+              newAccess->access.access = ReplaceVariables(access.access,argToVar,varNames,out);
+              newAccess->lhs = lhsName + stuff.lhs;
+            } break;
+            case ConfigStuffType_MEMORY_TRANSFER:{
+              // We should never have memory transfers at config functions, right?
+              NOT_IMPLEMENTED();
+            } break;
+          }
+          }
+        } else if(isLhsWireAccess && !isLhsWireVirtual){
+          // We are setting a value to a constant wire.
+          String wireName = lhsSub.name.identifier;
+
+          ConfigStuff* assign = list->PushElem();
+          assign->type = ConfigStuffType_ASSIGNMENT;
+          assign->assign.lhs = PushString(out,"%.*s.%.*s",UN(lhsName),UN(wireName));
+          assign->assign.rhs = rhsExpr;
+        } else if(isLhsWireVirtual || isRhsExpressionOnly || isRhsArrayAccess){
+          // Is Address gen expression. Including array accesses for VUnits
+
+          // TODO: We are not handling hierarchical instantiation.
+          //       Need to test things more before deciding how to progress.
+          // Store data needed inside ConfigStatement to help build simulation function later if needed.
+          simple->lhsName = lhsName;
+          simple->addressGenExpr = rhsExpr;
+          for(ConfigStatement* ptr = simple; ptr; ptr = ptr->parent){
+            ptr->neededBySimulationFunction = true;
+          }
+
+          // Compile address access and store it 
+          AddressAccess* access = CompileAddressGen(env,variableNames,forLoops,rhsExpr,content);
+          AddressGenInst supported = lhsBase.decl->supportedAddressGen;
+
+          // TODO: Need to check if the decomp expression matches what is actually supported by the entity.
+          //       Ex: An expression of the form a = array[i] is not supported if 'a' is a Generator.
+          ConfigStuff* newAssign = list->PushElem();
+
+          newAssign->type = ConfigStuffType_ADDRESS_GEN;
+          newAssign->access.access = access;
+          newAssign->access.inst = supported;
+          newAssign->access.dir = lhsSub.dir;
+          newAssign->access.port = lhsSub.port;
+
+          newAssign->pointerVarName = PushString(out,rhsEntity.name.identifier);
+          newAssign->lhs = lhsName;
+        } else {
+          // Decomp failed. Error already reported.
+          //Assert(false);
         }
-        }
-      } else if(decomp.isSingleWire){
-        // We are setting a value to a constant wire.
-        ConfigIdentifier* before = GetBeforeBase(simple->lhs);
-        String wireName = before->name.identifier;
 
-        ConfigStuff* assign = list->PushElem();
-        assign->type = ConfigStuffType_ASSIGNMENT;
-        assign->assign.lhs = PushString(out,"%.*s.%.*s",UN(lhsName),UN(wireName));
-        assign->assign.rhs = decomp.expr;
-      } else if(decomp.isVirtualWire || decomp.isExpr || decomp.isArray){
-        // Is Address gen expression. Including array accesses for VUnits
-        AddressAccess* access = CompileAddressGen(env,variableNames,loops,decomp.expr,content);
-        AddressGenInst supported = ent->instance->declaration->supportedAddressGen;
+        // Increment gen state in reverse order.
+        bool didAllLoops = true;
+        for(int i = genLoops.size - 1; i >= 0; i--){
+          GenLoopState& gen = genState[i];
 
-        // NOTE: Memories and Generator do not follow the addr[expr]. They just have <instance> = <expr>.
-        ConfigStuff* newAssign = list->PushElem();
+          gen.val += 1;
+          if(gen.val >= gen.end){
+            gen.val = gen.start;
+            continue;
+          }
 
-        newAssign->type = ConfigStuffType_ADDRESS_GEN;
-        newAssign->access.access = access;
-        newAssign->access.inst = supported;
-
-        if(portEnt){
-          newAssign->access.dir = portEnt->dir;
-          newAssign->access.port = portEnt->port;
+          didAllLoops = false;
+          break;
         }
 
-        newAssign->accessVariableName = PushString(out,decomp.entityName.identifier);
-        newAssign->lhs = lhsName;
-      } else {
-        Assert(false);
+        if(didAllLoops){
+          break;
+        }
       }
+      env->PopScope();
     }
   }
-
-  String stateStructContent = {};
 
   if(def->type == UserConfigType_STATE){
     type = ConfigFunctionType_STATE;
 
-    CEmitter* c = StartCCode(temp);
+    auto lhsSideMembers = PushList<Token>(temp);
+    for(ConfigStatement* stmt = def->stmts; stmt; stmt = stmt->next){
+
+      // Decompose lhs side =========================================================
+      ConfigIdentifier* id = stmt->lhs;
+      Token lhsName = id->name;
+
+      if(id->type != ConfigIdentifierType_BASE){
+        env->ReportError(lhsName,"State expressions can only contain simple names on lhs");
+      }
+
+      for(Token alreadyExist : lhsSideMembers){
+        if(lhsName.identifier == alreadyExist.identifier){
+          env->ReportError(lhsName,"Cannot repeat name of state element");
+        }
+      }
+      *lhsSideMembers->PushElem() = lhsName;
+
+      // Decompose rhs side =========================================================
+      Entity rhsEntity = Entity_Nil;
+      Entity rhsSubEntity = Entity_Nil;
+      IGNORE_UNUSED bool rhsError = false;
+
+      MathExpression* ptr = stmt->rhs;
+      FULL_SWITCH(ptr->type){
+      case MathType_NAME:
+      case MathType_LITERAL:
+      case MathType_OPERATION:{
+        SYM_Expr sym = env->SymbolicFromMathExpression(ptr);
+
+        rhsEntity.type = EntityType_SYM;
+        rhsEntity.sym = sym;
+      } break;
+
+      case MathType_ARRAY_ACCESS: {
+        rhsError = true;
+      } break;
+
+      case MathType_FUNCTION_CALL:
+      case MathType_ACCESS:{
+        MathExpression* shouldBeFU = ptr->expressions[0];
+        
+        FUAccess access = env->ResolveFU(shouldBeFU,temp);
+        
+        if(access.leftovers.size > 0){
+          rhsError = true;
+        }
+        
+        if(access.entity.type == EntityType_FU){
+          rhsEntity = access.entity;
+          rhsSubEntity = env->GetEntityFromAccess(rhsEntity,ptr->name);
+        }
+      } break;
+      }
+
+      bool found = false;
+      if(rhsSubEntity.type == EntityType_FUNCTION){
+        found = true;
+
+        String varName = rhsEntity.name.identifier;
+        
+        for(ConfigStuff stmt : rhsSubEntity.func->stuff){
+          ConfigStuff* assign = list->PushElem();
+          assign->type = ConfigStuffType_ASSIGNMENT;
+          assign->assign.lhs = lhsName.identifier;
+          assign->assign.rhsId = PushString(out,"%.*s.%.*s",UN(varName),UN(stmt.assign.rhsId));
+        }      
+      }
+
+      if(rhsSubEntity.type == EntityType_STATE_WIRE){
+        found = true;
+
+        String wireName = rhsSubEntity.name.identifier;
+        String varName = rhsEntity.name.identifier;
+
+        ConfigStuff* assign = list->PushElem();
+        assign->type = ConfigStuffType_ASSIGNMENT;
+        assign->assign.lhs = lhsName.identifier;
+        assign->assign.rhsId = PushString(out,"%.*s.%.*s",UN(varName),UN(wireName));
+      }
+
+      if(rhsEntity.type == EntityType_SYM){
+        found = true;
+
+        ConfigStuff* assign = list->PushElem();
+        assign->type = ConfigStuffType_ASSIGNMENT;
+        assign->assign.lhs = lhsName.identifier;
+        assign->assign.rhsId = SYM_Repr(rhsEntity.sym,out);
+        assign->assign.noAccess = true;
+      }
+
+      if(!found){
+        // TODO: Improved error messages
+        printf("Error, did not find an expected type\n");
+        ENTER_DEBUG();
+      }
+    }
+
+    // Generate C struct ==========================================================
+    FREE_ARENA(CCode1);
+    FREE_ARENA(CCode2);
+    CEmitter* c = StartCCode(out,CCode2);
     
     String structName = PushString(out,"%.*s_%.*s_Struct",UN(declaration->name),UN(def->name.identifier));
     structToReturnName = structName;
 
     c->Struct(structName);
-    for(ConfigStatement* stmt : def->statements){
-      String name = GetBase(stmt->lhs)->name.identifier;
-          
-      String wireName = {};
-      
-      ConfigIdentifier* before = GetBeforeBase(stmt->lhs);
-      if(before){
-        wireName = before->name.identifier;
-      }      
-
-      // TODO: Proper error reporting. 
-      Assert(Empty(wireName));
-
-      c->Member("int",name);
+    for(Token names : lhsSideMembers){
+      c->Member("int",names.identifier);
     }
     c->EndStruct();
 
     stateStructContent = PushASTRepr(c,out,false);
-
-    for(ConfigStatement* stmt : def->statements){
-      String name = GetBase(stmt->lhs)->name.identifier;
-
-      String wireName = {};
-      
-      ConfigIdentifier* before = GetBeforeBase(stmt->lhs);
-      if(before){
-        wireName = before->name.identifier;
-      }
-
-      Entity* ent = env->GetEntity(stmt->rhs,temp);
-
-      ParseResult parsedRhs = ParseRHS(env,stmt->rhs,temp);
-
-      if(ent->type == EntityType_CONFIG_FUNCTION){
-        String varName = parsedRhs.entityName.identifier;
-        
-        for(ConfigStuff stmt : ent->func->stuff){
-          ConfigStuff* assign = list->PushElem();
-          assign->type = ConfigStuffType_ASSIGNMENT;
-          assign->assign.lhs = name;
-          assign->assign.rhsId = PushString(out,"%.*s.%.*s",UN(varName),UN(stmt.assign.rhsId));
-        }      
-      } else if(parsedRhs.containsAccess){
-        ConfigStuff* assign = list->PushElem();
-          
-        String wireName = parsedRhs.wireName.identifier;
-        String varName = parsedRhs.entityName.identifier;
-
-        assign->type = ConfigStuffType_ASSIGNMENT;
-        assign->assign.lhs = name;
-        assign->assign.rhsId = PushString(out,"%.*s.%.*s",UN(varName),UN(wireName));
-      }
-    }
   }
   
   if(def->type == UserConfigType_MEM){
     type = ConfigFunctionType_MEM;
 
     for(Array<ConfigStatement*> stmts : individualStatements){
+      env->PushScope(EnvScopeType_FOR_LOOP);
+
+      auto forList = PushList<AddressGenForDef>(temp);
+      for(int i = 0; i < stmts.size - 1; i++){
+        if(stmts[i]->type == ConfigStatementType_FOR_LOOP){
+          *forList->PushElem() = stmts[i]->def;
+        }
+      }
+      Array<AddressGenForDef> forLoops = PushArray(temp,forList);
+
+      for(AddressGenForDef def : forLoops){
+        env->AddVariable(def.loopVariable);
+      }
+
+      // TODO: We only support a single transfer loop.
       ConfigStatement* stmt = stmts[0];
       ConfigStatement* simple = stmts[stmts.size - 1];
-
       bool singleStatement = (stmts.size == 1);
+
+      // Decompose lhs ==============================================================
+#if 0
+      Entity lhsBase = Entity_Nil;
+      Entity lhsExpr = Entity_Nil;
       
-      // We currently only support a single statement or a single loop.
-      // We technically can do multi loops just fine, just need to augment the logic to support it.
-      Assert(singleStatement || (stmt->type == ConfigStatementType_FOR_LOOP 
-                              && IsLeaf(simple->type)));
+      bool isLhsFunctionCall = false;
+      bool nameAlreadySeen = false;
+      bool lhsError = false;
+
+      ConfigIdentifier* ptr = simple->lhs;
+          
+      for(; ptr; ptr = ptr->next){
+        FULL_SWITCH(ptr->type){
+        case ConfigIdentifierType_BASE:{
+          // Parser should never allow this
+          Assert(!nameAlreadySeen);
+
+          lhsBase = env->GetEntity(ptr->name);
+          nameAlreadySeen = true;
+        } break;
+        case ConfigIdentifierType_ARRAY:{
+          if(isLhsFunctionCall){
+            env->ReportError({},"Cannot have array access after a function expression");
+            lhsError = true;
+          }
+
+          MathExpression* expr = ptr->arrayExpr;
+          bool found = false;
+          if(!found && lhsBase.type == EntityType_FU_ARRAY){
+            found = true;
+        
+            int index = env->CalculateConstantExpression(expr);
+        
+            if(index < 0 || index >= lhsBase.dims[0]){
+              env->ReportError({},"Outside array bounds");
+              lhsError = true;
+            }
+
+            String arrayName = PushString(out,"%.*s_%d",UN(lhsBase.name.identifier),index);
+        
+            Array<int> newDims = Offset(lhsBase.dims,1);
+
+            if(newDims.size > 0){
+              lhsBase.type = EntityType_FU_ARRAY;
+          
+              // TODO-2
+              lhsBase.name = {};
+              lhsBase.name.type = TokenType_IDENTIFIER;
+              lhsBase.name.identifier = arrayName;
+              lhsBase.name.originalData = arrayName;
+
+              lhsBase.dims = newDims;
+            } else {
+              FUInstance** possibleInst = env->table->Get(arrayName);
+
+              if(!possibleInst){
+                //ReportError({},"Inst does not exist");
+              } else {
+                lhsBase = MakeEntity(*possibleInst);
+              }
+            }
+          }
+        } break;
+      }
+#endif
 
       DecompConfigStatement decomp = DecomposeConfigStatement(env,simple,temp);
-      
+
       if(decomp.isFunctionInvoc){
         ConfigFunction* func = decomp.func;
 
@@ -520,38 +1002,31 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
           ConfigStuff* assign = list->PushElem();
           assign->type = ConfigStuffType_MEMORY_TRANSFER;
 
-          //nocheckin: This probably only currently works because variable have the same names
           // TODO: Need to create more complex tests to force the issue
+          //       This probably only currently works because variable have the same names
           assign->transfer = stuff.transfer;
           assign->transfer.name = simple->lhs->name.identifier + assign->transfer.name;
         }
-      } else {
-        ParseResult parsedRhs = ParseRHS(env,simple->rhs,temp);
+      } 
+      
+      Entity dst = Entity_Nil;
+      Entity src = Entity_Nil;
+      TransferDirection dir = TransferDirection_NONE;
 
-        Assert(parsedRhs.isArray);
+      // TODO: Weird logic. Also need to see how this would act when we add arrays and stuff like that into the mix.
+      if(decomp.lhs.entity.type == EntityType_FU){
+        dir = TransferDirection_READ;
+        dst = decomp.lhs.entity;
+        src = decomp.rhs.entity;
+      }
+      if(decomp.rhs.entity.type == EntityType_FU){
+        dir = TransferDirection_WRITE;
+        dst = decomp.rhs.entity;
+        src = decomp.lhs.entity;
+      }
 
-        EntityAndLeftoverAccess left = env->GetEntity(simple->lhs,temp);
-        Entity* right = env->GetEntity(parsedRhs.entityName);
-
-        Entity* unit = nullptr;
-        Entity* addrVar = nullptr;
-
-        TransferDirection dir = TransferDirection_NONE;
-        if(left.ent->type == EntityType_FU){
-          Assert(right->type == EntityType_VARIABLE_INPUT);
-          dir = TransferDirection_READ;
-
-          unit = left.ent;
-          addrVar = right;
-        } else {
-          Assert(left.ent->type == EntityType_VARIABLE_INPUT);
-          dir = TransferDirection_WRITE;
-
-          unit = right;
-          addrVar = left.ent;
-        }
-
-        SYM_Expr size = SYM_One;
+      if(dir != TransferDirection_NONE){
+        SYM_Expr size = SYM_1;
         if(!singleStatement){
           SYM_Expr start = env->SymbolicFromMathExpression(stmt->def.startSym);
           SYM_Expr end = env->SymbolicFromMathExpression(stmt->def.endSym);
@@ -563,10 +1038,12 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
         assign->type = ConfigStuffType_MEMORY_TRANSFER;
         assign->transfer.dir = dir;
         assign->transfer.size = size;
-        assign->transfer.name = assign->transfer.name + unit->instance->name;
+        assign->transfer.name = assign->transfer.name + dst.name.identifier;
 
-        assign->transfer.variable = PushString(out,addrVar->varName);
+        assign->transfer.variable = PushString(out,src.name.identifier);
       }
+
+      env->PopScope();
     }
   }
 
@@ -574,6 +1051,129 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
     varInfo[i].usedOnLoopExpressions = variablesUsedOnLoopExpressions->Exists(varInfo[i].name);
   }
 
+  // Handle extra computations ==================================================
+
+  // TODO:
+  // This is kinda "stupid" in a way since we are treating computations like a function level 
+  // type of logic when it should be more scope level. What if a function is called with arguments
+  // of a for loop variable? It is possible that the code is not capable of handling this
+  // since we only support a certain type of loops but regardless our code is not capable
+  // of reporting errors or correctly informing the user if we do not associate these 
+  // to the correct scope.
+  Array<Entity> extraCompEnts = env->GetAllComputations(temp);
+
+  auto compList = PushList<ConfigComputation>(temp);
+  for(int i = 0; i <  extraCompEnts.size; i++){
+    Entity ent = extraCompEnts[i];
+    String funcName = ent.functionName;
+    Array<SYM_Expr> args = ent.args;
+    String varName = ent.name.identifier;
+
+    ConfigComputation* comp = compList->PushElem();
+    
+    comp->outputName = PushString(out,varName);
+
+    FREE_ARENA(CCode1);
+    FREE_ARENA(CCode2);
+    CEmitter* c = StartCCode(out,CCode2);
+
+    String varValue = {};
+    if(funcName == "RangeSize"){
+      SYM_Expr trueStart = args[0];
+      SYM_Expr trueEnd = args[1];
+      SYM_Expr count = args[2];
+      SYM_Expr index = args[3];
+      
+      SYM_Expr trueSize = trueEnd - trueStart;
+      SYM_Expr mod = trueSize % count;
+      SYM_Expr workSize = SYM_FloorDiv(trueSize,count) + (index + SYM_1 <= mod);
+
+      varValue = SYM_Repr(workSize,temp);
+    }
+    if(funcName == "RangeLow"){
+      SYM_Expr trueStart = args[0];
+      SYM_Expr trueEnd = args[1];
+      SYM_Expr count = args[2];
+      SYM_Expr index = args[3];
+      
+      SYM_Expr trueSize = trueEnd - trueStart;
+      SYM_Expr mod = trueSize % count;
+      SYM_Expr workSize = SYM_FloorDiv(trueSize,count) + (index + SYM_1 <= mod);
+      SYM_Expr firstVal = index * workSize + mod * (mod < (index + SYM_1));
+
+      SYM_Expr final = SYM_Max(firstVal,SYM_0);
+
+      varValue = SYM_Repr(final,temp);
+    }
+    if(funcName == "RangeHigh"){
+      SYM_Expr trueStart = args[0];
+      SYM_Expr trueEnd = args[1];
+      SYM_Expr count = args[2];
+      SYM_Expr index = args[3];
+      
+      SYM_Expr trueSize = trueEnd - trueStart;
+      SYM_Expr mod = trueSize % count;
+      SYM_Expr workSize = SYM_FloorDiv(trueSize,count) + (index + SYM_1 <= mod);
+      //SYM_Expr firstValNoMod = index * workSize;
+      SYM_Expr firstVal = index * workSize + mod * (mod < (index + SYM_1));
+
+      SYM_Expr final = SYM_Max(firstVal,SYM_0);
+      SYM_Expr plusSize = final + workSize;
+
+      varValue = SYM_Repr(plusSize,temp);
+    }
+    c->VarDeclare("int",comp->outputName,varValue);
+
+    comp->cCode = EndCCode(c);
+  }
+
+  // Build simulation function if needed ========================================
+  static ConfigSimStatement ConfigSimStatement_NIL = {};
+  ConfigSimStatement* simStmt = &ConfigSimStatement_NIL;
+  if(def->sim){
+    auto Recurse = [env](auto Recurse,ConfigStatement* stmt,Arena* out) -> ConfigSimStatement*{
+      ConfigSimStatement* start = &ConfigSimStatement_NIL;
+      ConfigSimStatement* ptr = nullptr;
+
+      for(; stmt; stmt = stmt->next){
+        if(!stmt->neededBySimulationFunction){
+          continue;
+        }
+
+        ConfigSimStatement* node = PushStruct<ConfigSimStatement>(out);
+        
+        if(stmt->type == ConfigStatementType_FOR_LOOP){
+          node->type = ConfigSimStatementType_LOOP;
+          node->varName = PushString(out,stmt->def.loopVariable.identifier);
+          node->start = env->SymbolicFromMathExpression(stmt->def.startSym);
+          node->end = env->SymbolicFromMathExpression(stmt->def.endSym);
+
+          env->PushScope(EnvScopeType_FOR_LOOP);
+          env->AddVariable(stmt->def.loopVariable);
+          node->child = Recurse(Recurse,stmt->child,out);
+          env->PopScope();
+        } else {
+          node->type = ConfigSimStatementType_LHSName;
+          node->lhsName = PushString(out,stmt->lhsName);
+          node->expression = stmt->addressGenExpr;
+        }
+        
+        if(ptr){
+          ptr->next = node;
+          ptr = ptr->next;
+        }
+
+        if(!ptr){
+          start = ptr = node;
+        }
+      }
+
+      return start;
+    };
+
+    simStmt = Recurse(Recurse,def->stmts,out);
+  }
+  
   ConfigFunction* func = PushStruct<ConfigFunction>(out);
   func->type = type;
   func->decl = declaration;
@@ -584,7 +1184,9 @@ ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDecl
   func->structToReturnName = structToReturnName;
   func->stateStructContent = stateStructContent;
   func->debug = def->debug;
+  func->simLoops = simStmt;
   func->supportsSizeCalc = supportsSizeCalc;
+  func->extraComputations = PushArray(out,compList);
 
   env->PopScope();
   

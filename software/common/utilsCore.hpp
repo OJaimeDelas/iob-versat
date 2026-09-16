@@ -22,6 +22,13 @@
 #define MIN(A,B) ((A) < (B) ? (A) : (B))
 #define MAX(A,B) ((A) > (B) ? (A) : (B))
 
+// TODO: Not portable without also defining the linker script.
+//#define readonly __attribute__((section(".versat_rodata,\"a\"")))
+//#define readonly __attribute__((section(".rodata,\"a\"")))
+
+#define readonly __attribute__((section("versat.rodata,\"a\"")))
+//#define readonly
+
 inline float ABS(float f){return (f < 0.0f ? -f : f);};
 
 extern bool currentlyDebugging;
@@ -128,6 +135,7 @@ ALWAYS_INLINE _Once operator+(_OnceTag,F&& f){
 #define TEMP_once(LINE) TEMP__once( LINE )
 #define once static _Once TEMP_once(__LINE__) = _OnceTag() + [&] // Executes once even if called multiple times
 
+#define IGNORE_UNUSED __attribute__((unused))
 #define WARN_UNUSED __attribute__((warn_unused_result))
 
 void PrintStacktrace();
@@ -187,7 +195,8 @@ if(_){ \
   if(currentlyDebugging) { \
     if(COND){ \
       fflush(stdout); \
-      __asm__("int3");} \
+      __asm__("int3"); \
+      __asm__("nop");} \
   } else { \
     once{ \
       printf("Old debug break point still active:\n");  \
@@ -201,7 +210,8 @@ if(_){ \
 
 #define ENTER_DEBUG() if(currentlyDebugging) { \
   fflush(stdout); \
-  __asm__("int3");} \
+  __asm__("int3"); \
+  __asm__("nop");} \
 
 // TODO: Better name for this, or better ergonomics somewhat.
 #define DEBUG_BREAK_OR_EXIT() \
@@ -236,24 +246,6 @@ if(_){ \
    B = TEMP; \
    } while(0)
 
-#define HASH(TYPENAME,COND) \
-template<> struct std::hash<TYPENAME>{ \
-  std::size_t operator()(TYPENAME const& x) const noexcept{ \
-    std::size_t hash = (COND); \
-    return hash; \
-  } \
-};
-
-#define EQUALITY(TYPENAME,COND) \
-inline bool operator==(const TYPENAME& lhs,const TYPENAME& rhs){ \
-  bool res = (COND); \
-  return res; \
-} \
-inline bool operator!=(const TYPENAME& lhs,const TYPENAME& rhs){ \
-  bool res = !(COND); \
-  return res; \
-}
-
 typedef uint8_t Byte;
 typedef uint8_t u8;
 typedef int8_t i8;
@@ -272,6 +264,10 @@ inline u64 Hash(void* ptr){
 }
 
 inline u64 Hash(int in){
+  return (u64) in;
+}
+
+inline u64 Hash(u32 in){
   return (u64) in;
 }
 
@@ -372,6 +368,14 @@ Time operator+(const Time& s1,const Time& s2);
 bool operator>(const Time& s1,const Time& s2);
 bool operator==(const Time& s1,const Time& s2);
 
+inline bool Equal(int lhs,int rhs){
+  bool res = (lhs == rhs);
+  return res;
+}
+inline bool Equal(void* lhs,void* rhs){
+  bool res = (lhs == rhs);
+  return res;
+}
 static constexpr Time Seconds(u64 seconds){Time t = {}; t.seconds = seconds; return t;};
 static constexpr Time MilliSeconds(u64 milli){Time t = {}; t.microSeconds = milli * 1000; return t;};
 
@@ -485,6 +489,9 @@ inline bool operator==(String first,String second){
       }
    }
    return true;
+}
+inline bool Equal(String first,String second){
+  return (first == second);
 }
 
 inline bool operator!=(String first,String second){
@@ -673,7 +680,7 @@ struct Value{
   };
 };
 
-// nocheckin: TODO: Reorganize
+// TODO: Reorganize
 bool Contains(String str,String toCheck);
 int ParseInt(String str);
 
@@ -816,3 +823,55 @@ inline bool Contains(Array<String> array,String toCheck){
    }
    return false;
 }
+
+#define LL_Append(HEAD,TAIL,NEXT,NODE) \
+  if(NODE) { \
+  Assert(!TAIL || !TAIL->NEXT); \
+  if(HEAD == nullptr){ \
+    HEAD = NODE; \
+    TAIL = NODE; \
+  } else if(NODE) { \
+    TAIL->NEXT = NODE; \
+  } \
+  while(TAIL->NEXT) TAIL = TAIL->NEXT; \
+  }
+
+#define LL_PopFront(HEAD,NEXT) \
+  HEAD; \
+  if(HEAD) HEAD = HEAD->NEXT
+
+#define LL_Push(HEAD,NEXT,NODE) \
+  NODE->NEXT = HEAD; \
+  HEAD = NODE
+
+// NOTE: Care when using this, cannot depend on node and prev for loop conditions since this changes them.
+//       Best way of using this is to store the values needed for loop conditions before calling this macro.
+// TODO: Need to find a less bug prone way of doing this.
+//       But until then, basically allocate a next and prev pointer before the loop.
+//       Next is set immediatly every iteration with the next of the node
+//       Prev is only set if the node is not removed.
+#define LL_Remove(HEAD,TAIL,NEXT,NODE,PREV) \
+  if(!PREV) { \
+    Assert(NODE == HEAD); \
+    HEAD = NODE->NEXT; \
+    if(!HEAD){ \
+      TAIL = HEAD; \
+    } \
+  } else { \
+    PREV->NEXT = NODE->NEXT; \
+    if(TAIL == NODE) TAIL = PREV; \
+  }
+
+#define DLL_Append(HEAD,TAIL,NEXT,PREV,NODE) \
+  if(NODE) { \
+  Assert(!NODE->PREV); \
+  Assert(!TAIL || !TAIL->NEXT); \
+  if(HEAD == nullptr){ \
+    HEAD = NODE; \
+    TAIL = NODE; \
+  } else if(NODE) { \
+    TAIL->NEXT = NODE; \
+    NODE->PREV = TAIL; \
+  } \
+  while(TAIL->NEXT) TAIL = TAIL->NEXT; \
+  }

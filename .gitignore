@@ -11,6 +11,8 @@ examples/iob_versat_V*/
 TAGS
 compile_flags.txt
 
+software/compiler/*_meta.hpp
+
 # document/ build artifacts (see document/Makefile)
 document/*.tex
 document/*.cls

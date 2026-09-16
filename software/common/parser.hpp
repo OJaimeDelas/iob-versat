@@ -3,6 +3,8 @@
 #include "utils.hpp"
 #include "utilsCore.hpp"
 
+#include "debug.hpp"
+
 enum TokenType : u16{
   TokenType_INVALID = 0,
   TokenType_EOF,
@@ -50,9 +52,11 @@ enum TokenType : u16{
   TokenType_KEYWORD_SHARE,
   TokenType_KEYWORD_STATIC,
   TokenType_KEYWORD_DEBUG,
+  TokenType_KEYWORD_SIM, // TODO: This and debug should not be a keyword. They can just be identifiers.
   TokenType_KEYWORD_CONFIG,
   TokenType_KEYWORD_STATE,
   TokenType_KEYWORD_MEM,
+  TokenType_KEYWORD_GEN,
   TokenType_KEYWORD_FOR,
   // } End keywords
 
@@ -62,7 +66,7 @@ enum TokenType : u16{
   TokenType_VERILOG_UNDEF,
   TokenType_VERILOG_TIMESCALE,
   TokenType_VERILOG_INCLUDE,
-  // nocheckin: Missing (timescale, resetall, undefineall)
+  // TODO: Missing (timescale, resetall, undefineall)
   TokenType_VERILOG_IFDEF,
   TokenType_VERILOG_IFNDEF,
   TokenType_VERILOG_ELSE,
@@ -104,12 +108,10 @@ enum TokenType : u16{
   // a name and cause problems later on (Ex: 'const' is a valid name
   // from the POV of Versat but its a keyword in C which causes
   // problems when generating the C structs and so on).
-  TokenType_C_KEYWORD,
-
-  TokenType_C_STRING,
-
   // We solve this by adding a number at the end of every instance
   // so for now this is mostly unused
+  TokenType_C_KEYWORD,
+  TokenType_C_STRING,
   TokenType_VERILOG_KEYWORD
 };
 
@@ -135,7 +137,7 @@ struct Token{
   TokenType type;
 
   String originalData;
-  FileContent originalFile;
+  FileContent originalFile; 
 
   union{
     String identifier;
@@ -203,6 +205,11 @@ struct Parser{
 
   ArenaList<String>* errors;
 
+  bool debug;
+  int lastDebugIndex;
+  LocationNode* debugLocHead;
+  LocationNode* debugLocTail;
+
   ParsingOptions options;
   const char* currentFile; // Optional, gives better error messages
 
@@ -224,13 +231,13 @@ struct Parser{
   bool IfNextToken(TokenType type);
   bool IfNextToken(char singleChar);
 
-  bool IfPeekToken(TokenType type);
-  bool IfPeekToken(char singleChar);
+  bool IfPeekToken(TokenType type,int lookahead = 0);
+  bool IfPeekToken(char singleChar,int lookahead = 0);
   
   Token ExpectNext(TokenType type);
   Token ExpectNext(char singleChar);
 
-  void ExpectIdentifier(String expectedContent);
+  Token ExpectIdentifier(String expectedContent);
 
   void Synch(BracketList<TokenType> possibleTypes);
 

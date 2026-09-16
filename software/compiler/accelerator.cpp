@@ -16,6 +16,14 @@
 
 static Pool<Accelerator> accelerators;
 
+readonly ConnectionNode ConnectionNode_Nil = {.next = &ConnectionNode_Nil};
+readonly FUInstance FUInstance_NilInst = {.declaration = &FUDeclaration_Nil,.allInputs = &ConnectionNode_Nil,.allOutputs = &ConnectionNode_Nil};
+
+bool Nil(FUInstance* inst){
+  bool res = (inst == FUInstance_Nil);
+  return res;
+}
+
 // ======================================
 // Accelerator creation
 
@@ -186,7 +194,6 @@ FUInstance* CopyInstance(Accelerator* accel,FUInstance* oldInstance,bool preserv
     newInst->id = oldInstance->id;
   }
   newInst->isMergeMultiplexer = oldInstance->isMergeMultiplexer;
-  newInst->addressGenUsed = oldInstance->addressGenUsed;
   newInst->debug = oldInstance->debug;
   
   return newInst;
@@ -532,7 +539,7 @@ Array<FUDeclaration*> MemSubTypes(AccelInfo* info,Arena* out){
   if(info->infos.size > 0){
     Array<InstanceInfo> test = info->infos[0].info;
     for(InstanceInfo& info : test){
-      if(!SYM_IsZeroValue(info.memMapSym)){
+      if(!SYM_IsNil(info.memMapSym)){
         maps->Insert(GetTypeByName(info.typeName));
       }
     }
@@ -562,22 +569,6 @@ Hashmap<StaticId,StaticData>* CollectStaticUnits(AccelInfo* info,Arena* out){
   return staticUnits;
 }
 
-// Checks wether the external memory conforms to the expected interface or not (has valid values)
-bool VerifyExternalMemory(ExternalMemoryInterface* inter){
-  bool res = false;
-
-  switch(inter->type){
-  case ExternalMemoryType::ExternalMemoryType_2P:{
-    res = (inter->tp.bitSizeIn == inter->tp.bitSizeOut);
-  }break;
-  case ExternalMemoryType::ExternalMemoryType_DP:{
-    res = (inter->dp[0].bitSize == inter->dp[1].bitSize);
-  }break;
-  }
-
-  return res;
-}
-
 // Function that calculates byte offset from size of data_w
 int DataWidthToByteOffset(int dataWidth){
   // 0-8 : 0,
@@ -595,7 +586,7 @@ int DataWidthToByteOffset(int dataWidth){
   return res;
 }
 
-// nocheckin: We appear to only use this for displaying the size of memories just to inform the user. It is not mandatory to have this working, it was just nice to have.
+// TODO: We appear to only use this for displaying the size of memories just to inform the user. It is not mandatory to have this working, it was just nice to have.
 #if 0
 int ExternalMemoryByteSize(ExternalMemoryInterface* inter){
   Assert(VerifyExternalMemory(inter));
@@ -638,14 +629,6 @@ int ExternalMemoryByteSize(Array<ExternalMemoryInterface> interfaces){
 }
 #endif
 
-struct HuffmanNode{
-  InstanceInfo* unit;
-  int value;
-  // Leafs have both of these at nullptr
-  HuffmanNode* left;
-  HuffmanNode* right;
-}; 
-
 VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Arena* out){
   TEMP_REGION(temp,out);
   VersatComputedValues res = {};
@@ -658,6 +641,14 @@ VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Aren
   // Calculate memory mapping bits
   // Memory info needs to be instantiated. We cannot handle parameters in memory mapping interfaces at this point
   {
+    struct HuffmanNode{
+      InstanceInfo* unit;
+      int value;
+      // Leafs have both of these at nullptr
+      HuffmanNode* left;
+      HuffmanNode* right;
+    }; 
+
     for(int i = 0; i < info->infos.size; i++){
       auto builder = PushList<HuffmanNode*>(temp);
       for(AccelInfoIterator iter = StartIteration(info,i); iter.IsValid(); iter = iter.Step()){
@@ -665,7 +656,7 @@ VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Aren
         if(unit->isComposite){
           continue;
         }
-        if(SYM_IsZeroValue(unit->memMapSym)){
+        if(SYM_IsNil(unit->memMapSym)){
           continue;
         }
 
@@ -729,14 +720,15 @@ VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Aren
   }
 
   SYM_Expr defaultDelaySize = SYM_Var("DELAY_W");
-  SYM_Expr configExpr = SYM_Zero;
-  SYM_Expr delayBits = SYM_Zero;
+  SYM_Expr configExpr = SYM_0;
+  SYM_Expr stateExpr = SYM_0;
+  SYM_Expr delayBits = SYM_0;
   int externalMemoryInterfaces = 0; 
-  
+
   for(AccelInfoIterator iter = StartIteration(info); iter.IsValid(); iter = iter.Next()){
     InstanceInfo* unit = iter.CurrentUnit();
     
-    if(!SYM_IsZeroValue(unit->memMapSym)){
+    if(!SYM_IsNil(unit->memMapSym)){
       res.unitsMapped += 1;
     }
 
@@ -747,7 +739,7 @@ VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Aren
 
     res.nStates += unit->states.size;
     for(Wire& wire : unit->states){
-      res.stateBits += wire.sizeExpr;
+      stateExpr += wire.sizeExpr;
     }
 
     res.nDelays += unit->numberDelays;
@@ -802,6 +794,14 @@ VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Aren
       AddRegister(reg.t);
     }
   }
+  
+  if(globalOptions.insertCaptureDatabusRegisters){
+    AddRegister(VersatRegister_CaptureDatabusIndexAndReadWrite);
+    AddRegister(VersatRegister_CaptureDatabusCount);
+    AddRegister(VersatRegister_CaptureDatabusGetAddr);
+    AddRegister(VersatRegister_CaptureDatabusGetValue);
+    AddRegister(VersatRegister_CaptureDatabusGetDidCapture);
+  }
 
   res.nConfigs += res.versatConfigs;
   res.nStates += res.versatStates;
@@ -810,6 +810,8 @@ VersatComputedValues ComputeVersatValues(Accelerator* graph,AccelInfo* info,Aren
   int nConfigurations = res.nConfigs + res.nStatics + res.nDelays;
   res.configurationBits = configExpr + staticBits + delayBits;
   res.delayBitsStart = configExpr + staticBits;
+
+  res.stateBits = stateExpr;
 
   res.memoryAddressBits = maxMemMapBits;
 
@@ -906,7 +908,7 @@ void FixOutputs(FUInstance* node){
 }
 
 Array<Edge> GetAllEdges(Accelerator* accel,Arena* out){
-  auto arr = StartArray<Edge>(out);
+  auto arr = StartGrowableArray<Edge>(out);
   for(FUInstance* ptr : accel->allocated){
     FOREACH_LIST(ConnectionNode*,con,ptr->allOutputs){
       Edge edge = MakeEdge(ptr,con->port,con->instConnectedTo.inst,con->instConnectedTo.port,con->edgeDelay);

@@ -104,7 +104,7 @@ void PrintExpression(VExpr* exp){
 }
 
 SYM_Expr SymbolicExpressionFromVerilog(VExpr* topExpr){
-  SYM_Expr res = SYM_Zero;
+  SYM_Expr res = SYM_Nil;
 
   FULL_SWITCH(topExpr->type){
   case VExpr::UNDEFINED: {
@@ -152,7 +152,7 @@ SYM_Expr SymbolicExpressionFromVerilog(ExpressionRange range){
   SYM_Expr top = SymbolicExpressionFromVerilog(range.top);
   SYM_Expr bottom = SymbolicExpressionFromVerilog(range.bottom);
 
-  SYM_Expr res = top - bottom + SYM_One;
+  SYM_Expr res = top - bottom + SYM_1;
 
   return res;
 }
@@ -851,7 +851,7 @@ VExpr* VerilogParseExpression(Parser* parser,Arena* out,int bindingPower){
   TEMP_REGION(temp,out);
   auto infos = PushArray<OpInfo>(temp,7);
 
-  // nocheckin: TODO: We are missing a couple of operations and need to double check 
+  // TODO: We are missing a couple of operations and need to double check 
   // TODO: Need to double check binding power
   infos[0] = {TOK_TYPE('&'),0,"&"};
   infos[1] = {TOK_TYPE('|'),0,"|"};
@@ -1256,7 +1256,7 @@ Array<Module> ParseVerilogFile(String fileContent,Array<String> includeFilepaths
 
   VerilogTokenizerState* state = PushStruct<VerilogTokenizerState>(tokenizer);
 
-  // nocheckin: TODO: Since we now have the filesystem return the file content, we can just rewrite this function to receive a filepath instead of receiving the content directly.
+  // TODO: Since we now have the filesystem return the file content, we can just rewrite this function to receive a filepath instead of receiving the content directly.
 
   state->arena = tokenizer;
   state->definesMap = PushTrieMap<String,DefineInfo>(parsing);
@@ -1333,10 +1333,10 @@ ModuleInfo ExtractModuleInfo(Module& module,Arena* out){
 
   info.defaultParameters = module.parameters;
 
-  auto inputs = StartArray<PortInfo>(out);
-  auto outputs = StartArray<PortInfo>(out);
-  auto configs = StartArray<WireExpression>(out);
-  auto states = StartArray<WireExpression>(out);
+  auto inputs = StartGrowableArray<PortInfo>(out);
+  auto outputs = StartGrowableArray<PortInfo>(out);
+  auto configs = StartGrowableArray<WireExpression>(out);
+  auto states = StartGrowableArray<WireExpression>(out);
 
   info.name = module.name;
   info.isSource = module.isSource;
@@ -1561,7 +1561,7 @@ void ParseVerilogFileTest(){
   state->stageBuffer[0].type = VerilogTokenizerStageType_FILE;
 
   String tests[] = {
-#if 0
+#if 1
 {R"FOO(`define A
 B
 )FOO"},
@@ -1619,6 +1619,5 @@ B
       String res = PARSE_PushDebugRepr(temp,t);
       printf("%.*s\n",UN(res));
     }
-
   }
 }

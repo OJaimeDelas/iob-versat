@@ -89,6 +89,9 @@ struct StructElement{
 
 inline u64 Hash(StructInfo* info);
 inline bool operator==(StructInfo& l,StructInfo& r);
+inline bool Equal(StructInfo& l,StructInfo& r){
+  return (l == r);
+}
 
 inline u64 Hash(StructElement x){
   u64 res = Hash(x.name) + 
@@ -174,3 +177,4 @@ void OutputIterativeSource(FUDeclaration* decl,FILE* file);
 void OutputTopLevelFiles(Accelerator* accel,FUDeclaration* topLevelDecl,String hardwarePath,String softwarePath,VersatComputedValues val);
 
 void OutputTestbench(FUDeclaration* decl,FILE* file);
+

@@ -3,32 +3,15 @@
 #include "addressGen.hpp"
 #include "hierName.hpp"
 
-// TODO: Remove this.
-#include "versatSpecificationParser.hpp"
-
 struct FUDeclaration;
 struct AddressAccess;
+struct ConfigIdentifier;
+struct CAST;
 
 // Move user configuration functions here.
 
 // ============================================================================
 // Parsed structs only (not validated and no strings is saved)
-
-enum ConfigExpressionType{
-  ConfigExpressionType_IDENTIFIER,
-  ConfigExpressionType_NUMBER
-};
-
-struct ConfigExpression{
-  ConfigExpressionType type;
-
-  Token identifier;
-  Token access; // Only single access supported, do not see why would need more than one.
-
-  // TODO: Union
-  ConfigExpression* child;
-  int number;
-};
 
 // TODO: While this exists, we do not want to have different flow if possible. I think that it should be possible to describe the data in such a way that we do not have to make this distinction.
 enum UserConfigType{
@@ -38,53 +21,46 @@ enum UserConfigType{
   UserConfigType_STATE
 };
 
-enum ConfigRHSType{
-  ConfigRHSType_SYMBOLIC_EXPR,
-  ConfigRHSType_FUNCTION_CALL,
-  ConfigRHSType_IDENTIFIER
-};
-
-struct FunctionInvocation{
-  String functionName;
-  Array<Token> arguments; // TODO: For now we do not allow any expression. Only simple assignments.
-};
-
 enum ConfigStatementType{
+  ConfigStatementType_EMPTY = 0,
   ConfigStatementType_FOR_LOOP,
+  ConfigStatementType_GEN_LOOP,
   ConfigStatementType_EQUALITY,
   ConfigStatementType_FUNCTION_CALL
 };
 
-inline bool IsLeaf(ConfigStatementType type){ return (type == ConfigStatementType_EQUALITY || type == ConfigStatementType_FUNCTION_CALL);}
+inline bool IsLeaf(ConfigStatementType type){return (type == ConfigStatementType_EQUALITY || type == ConfigStatementType_FUNCTION_CALL);}
+
+inline bool IsLoop(ConfigStatementType type){return (type == ConfigStatementType_FOR_LOOP || type == ConfigStatementType_GEN_LOOP);}
 
 struct ConfigStatement{
+  ConfigStatement* next;
+  ConfigStatement* child;
+
+  ConfigStatement* parent; // Only set after parsing, helps building simulation function
+
   ConfigStatementType type;
 
-  // Why have a ConfigIdentifier and a SpecExpression?
+  // Why have a ConfigIdentifier and a MathExpression?
 
   // TODO: Union
+  // Statement
   ConfigIdentifier* lhs;
   MathExpression* rhs;
-  AddressGenForDef def;
-  Array<ConfigStatement*> childs; // Only for loops contains these right now.
-};
 
-enum ConfigVarType{
-  ConfigVarType_SIMPLE,
-  ConfigVarType_ADDRESS,
-  ConfigVarType_FIXED,
-  ConfigVarType_DYN
+  // Loops
+  AddressGenForDef def;
+
+// To help build the simulation function. The ConfigStatement node format and the final C code for loop expressions are the exact same meaning that it is easier to mantain the ConfigStatement node structure and store data directly rather than rebuilding the same structure .
+  SYM_Expr addressGenExpr;
+  String lhsName;
+  bool neededBySimulationFunction;
 };
 
 struct ConfigVarDeclaration{
   Token name;
-
-  // TODO: Not implemented, just parsed currently.
-  
-  //ConfigVarType type;
   Token type;
-  int arraySize;
-  bool isArray;
+  MathExpression* arraySize; // If non null then its an array.
 };
 
 struct ConfigFunctionDef{
@@ -92,15 +68,19 @@ struct ConfigFunctionDef{
   
   Token name;
   Array<ConfigVarDeclaration> variables;
-  Array<ConfigStatement*> statements;
+  ConfigStatement* stmts;
+  //Array<ConfigStatement*> statements;
   bool debug;
+  bool sim;
 };
 
 // ============================================================================
 // Instantiation and manipulation
 
-// TODO: We want to remove this. Stupid to force the user to have to provide a switch when we can just figure out on our side. Still need to take care about the differences between config/mem and state.
+// TODO: We probably want to remove the need for the user to specify this. Stupid to force the user to have to provide a switch when we can just figure out on our side. Still need to take care about the differences between config/mem and state.
 enum ConfigFunctionType{
+  //ConfigFunctionType_NIL,
+
   ConfigFunctionType_CONFIG,
   ConfigFunctionType_STATE,
   ConfigFunctionType_MEM
@@ -131,8 +111,9 @@ struct ConfigAssignment{
   String lhs;
   SYM_Expr rhs;
   String rhsId;
-  
+
   String special;
+  bool noAccess; // TODO: For now this is used to indicate that we do not want to access 
 };
 
 struct ConfigStuff{
@@ -141,8 +122,9 @@ struct ConfigStuff{
   // TODO: This lhs is only for access. Need to join stuff with assign and access if we eventually cleanup the code.
   HIER_Name lhs;
 
-  String accessVariableName;
-  String nameOfLeftEntity;
+  String pointerVarName;
+
+  String extraLoopStartAndEndTemplate;
 
   union{
     ConfigAssignment assign;
@@ -151,14 +133,51 @@ struct ConfigStuff{
   };
 };
 
+enum ConfigVarType{
+  ConfigVarType_SIMPLE,
+  ConfigVarType_BUFFER,
+  ConfigVarType_FIXED,
+  ConfigVarType_DYN
+};
+
 struct ConfigVariable{
   ConfigVarType type;
   String name;
+  int arraySize;
   bool usedOnLoopExpressions;
+};
+
+struct ConfigComputation{
+  String outputName;
+  CAST* cCode;
+};
+
+enum ConfigSimStatementType{
+  ConfigSimStatementType_NIL,
+  ConfigSimStatementType_LHSName,
+  ConfigSimStatementType_LOOP,
+};
+
+struct ConfigSimStatement{
+  ConfigSimStatementType type;
+
+  ConfigSimStatement* next;
+  ConfigSimStatement* child;
+
+  // Loop
+  String varName;
+  SYM_Expr start;
+  SYM_Expr end;
+
+  // Address statement
+  String lhsName;
+  SYM_Expr expression;
 };
 
 struct ConfigFunction{
   ConfigFunctionType type;
+
+  Array<ConfigComputation> extraComputations;
 
   String individualName;
   String fullName;
@@ -166,6 +185,9 @@ struct ConfigFunction{
 
   Array<ConfigStuff> stuff;
   Array<ConfigVariable> variables;
+
+  ConfigSimStatement* simLoops;
+
   String structToReturnName;
   String stateStructContent;
 
@@ -180,3 +202,4 @@ struct ConfigFunction{
 // TODO: Instead of passing the content, it would be easier if the function was capable of reporting the errors without having to accesss the text, just by storing the relevant tokens and the upper parts of the code is responsible for reporting it. The language is not that complicated meaning that we are free to just define all the possible errors in a large enum and having a simple structure that stores all the relevant data. 
 ConfigFunction* InstantiateConfigFunction(Env* env,ConfigFunctionDef* def,FUDeclaration* declaration,String content,Arena* out);
 
+extern ConfigFunction ConfigFunction_Nil;

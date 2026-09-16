@@ -84,9 +84,11 @@ String PushRepr(Arena* out,TokenType type){
   SIMPLE(TokenType_KEYWORD_SHARE,"Keyword","share");
   SIMPLE(TokenType_KEYWORD_STATIC,"Keyword","static");
   SIMPLE(TokenType_KEYWORD_DEBUG,"Keyword","debug");
+  SIMPLE(TokenType_KEYWORD_SIM,"Keyword","sim");
   SIMPLE(TokenType_KEYWORD_CONFIG,"Keyword","config");
   SIMPLE(TokenType_KEYWORD_STATE,"Keyword","state");
   SIMPLE(TokenType_KEYWORD_MEM,"Keyword","mem");
+  SIMPLE(TokenType_KEYWORD_GEN,"Keyword","gen");
   SIMPLE(TokenType_KEYWORD_FOR,"Keyword","for");
 
   SIMPLE(TokenType_VERILOG_DEFINE,"Verilog","define");
@@ -144,9 +146,11 @@ String PARSE_PushDebugRepr(Arena* out,Token token){
   SIMPLE(TokenType_KEYWORD_SHARE,"Keyword","share");
   SIMPLE(TokenType_KEYWORD_STATIC,"Keyword","static");
   SIMPLE(TokenType_KEYWORD_DEBUG,"Keyword","debug");
+  SIMPLE(TokenType_KEYWORD_SIM,"Keyword","sim");
   SIMPLE(TokenType_KEYWORD_CONFIG,"Keyword","config");
   SIMPLE(TokenType_KEYWORD_STATE,"Keyword","state");
   SIMPLE(TokenType_KEYWORD_MEM,"Keyword","mem");
+  SIMPLE(TokenType_KEYWORD_GEN,"Keyword","gen");
   SIMPLE(TokenType_KEYWORD_FOR,"Keyword","for");
 
   SIMPLE(TokenType_VERILOG_DEFINE,"Verilog","define");
@@ -208,7 +212,8 @@ Parser* StartParsing(TokenizeFunction tokenizer,void* tokenizerState,Arena* free
   res->tokenizer = tokenizer;
   res->arena = freeArena;
   res->options = options;
-  
+  res->errors = PushList<String>(freeArena);
+
   return res;
 }
 
@@ -280,6 +285,113 @@ Token Parser::NextToken(){
   }
   this->amountStored -= 1;
 
+  if(this->debug){
+    TEMP_REGION(temp,arena);
+    
+    bool hasError = !Empty(this->errors);
+
+    DEBUG_AddLocation(debugLocHead,debugLocTail,arena);
+    
+    // NOTE: Slow but we want to output immediatly
+    Array<LocationNode*> list = DEBUG_DepthFirst(debugLocHead,temp);
+    int lastLevel = 0;
+    for(int i = lastDebugIndex; i < list.size; i++){
+      LocationNode* node = list[i];
+      if(!Contains(node->loc.functionName,"SP")){
+        continue;
+      }
+      lastLevel = node->level;
+    }
+
+    for(int i = lastDebugIndex; i < list.size; i++){
+      LocationNode* node = list[i];
+
+      if(!Contains(node->loc.functionName,"SP")){
+        continue;
+      }
+      
+      if(hasError){
+        printf("--->");
+      } else {
+        printf("    ");
+      }
+
+      for(int level = 0; level < node->level; level++){
+        printf("  ");
+      }
+
+      printf("[%d] %.*s:%u",node->level,UN(node->loc.functionName),node->loc.line);
+      
+      if(node->level == lastLevel  && !Empty(res.originalData)){
+        printf(" Token: '%.*s'",UN(res.originalData));
+      }
+
+      printf("\n");
+    }
+    lastDebugIndex = list.size;
+  }
+  
+  //static int lastIndex = 0;
+#if 0
+  if(this->debug){
+    TEMP_REGION(temp,nullptr);
+
+    Array<Location> stackTrace = CollectStackTrace(temp);
+    DEBUG_BREAK();
+    ReverseInPlace(stackTrace);
+    Array<Location> reversed = stackTrace;
+
+    auto PrintStack = [&reversed] (int i) -> void{
+      for(int j = 0; j < i; j++){
+        printf("  ");
+      }
+        
+      printf("[%d] %.*s:%d: ",i,UN(reversed[i].functionName),reversed[i].line);
+    };
+
+    int currentIndex = -1;
+    for(int i = reversed.size - 1; i >= 0; i--){
+      if(Contains(reversed[i].functionName,"SP")){
+        currentIndex = i;
+        break;
+      }
+    }
+
+    //PrintStack(reversed.size - 1);
+    //printf("\n");
+
+#if 1
+    if(lastIndex + 1 < currentIndex){
+      for(int i = lastIndex + 1; i < currentIndex; i++){
+        if(this->errors->head){
+          printf("-->");
+        } else {
+          printf("   ");
+        }
+        PrintStack(i);
+        printf("NO TOKEN\n");
+      }
+    }
+#endif
+
+    if(this->errors->head){
+      printf("-->");
+    } else {
+      printf("   ");
+    }
+    
+    PrintStack(currentIndex);
+    if(!Empty(res.identifier)){
+      printf("%.*s",UN(res.identifier));
+    }
+    //DEBUG_BREAK();
+    //String res = V_PushRepr(res,temp);
+    //printf("%.*s\n",UN(res));
+    printf("\n");
+    lastIndex = currentIndex;
+  }
+#endif
+
   return res;
 }
 
@@ -305,8 +417,8 @@ bool Parser::IfNextToken(char singleChar){
   return IfNextToken(TOK_TYPE(singleChar));
 }
 
-bool Parser::IfPeekToken(TokenType type){
-  Token tok = PeekToken();
+bool Parser::IfPeekToken(TokenType type,int lookahead){
+  Token tok = PeekToken(lookahead);
   if(tok.type == type){
     return true;
   }
@@ -314,28 +426,30 @@ bool Parser::IfPeekToken(TokenType type){
   return false;
 }
 
-bool Parser::IfPeekToken(char singleChar){
+bool Parser::IfPeekToken(char singleChar,int lookahead){
   Assert(IsCharSingleToken(singleChar));
 
-  return IfPeekToken(TOK_TYPE(singleChar));
+  return IfPeekToken(TOK_TYPE(singleChar),lookahead);
 }
 
 Token Parser::ExpectNext(TokenType type){
   Token tok = NextToken();
 
   if(type == TokenType_IDENTIFIER && (options & ParsingOptions_ERROR_ON_C_VERILOG_KEYWORDS)){
+#if 0
     if(tok.type == TokenType_C_KEYWORD && options & ParsingOptions_ERROR_ON_C_KEYWORDS){
       ReportError("Expected identifier but instead got a C reserved keyword.\n We cannot have C keywords since we will have to generate C code and the generated code will be malformed");
     } else if(tok.type == TokenType_VERILOG_KEYWORD && options & ParsingOptions_ERROR_ON_VERILOG_KEYWORDS){
       ReportError("Expected identifier but instead got a Verilog reserved keyword.\n We cannot have Verilog keywords since we will have to generate Verilog code and the generated code will be malformed");
     }
+#endif
   } else if(tok.type != type){
     TEMP_REGION(temp,nullptr);
 
     FileContent content = tok.originalFile;
 
     LocInfo loc = PARSE_GetLinesAroundLocation(tok.originalData.data,content.content,1,1,temp);
-    
+
     String typeRepr = PushRepr(temp,type);
     String repr = PARSE_PushDebugRepr(temp,tok);
     String error = PushString(temp,"Unexpected token. Expected type: %.*s , Got: %.*s",UN(typeRepr),UN(repr));
@@ -370,7 +484,7 @@ Token Parser::ExpectNext(char singleChar){
   return ExpectNext(TOK_TYPE(singleChar));
 }
 
-void Parser::ExpectIdentifier(String expectedContent){
+Token Parser::ExpectIdentifier(String expectedContent){
   Token token = NextToken();
 
   if(token.type == TokenType_IDENTIFIER){
@@ -381,7 +495,7 @@ void Parser::ExpectIdentifier(String expectedContent){
     ReportError("Expected identifier, got instead");
   }
 
-  return;
+  return token;
 }
 
 void Parser::Synch(BracketList<TokenType> possibleTypes){
@@ -752,8 +866,7 @@ TokenizeResult ParseCString(const char* start,const char* end){
   };
 
   // TODO: Not doing anything with this but we could report as error if we define a token type for unterminated escape sequences (like we do with unterminated comments).
-  bool unterminatedEscapeSequence = false;
-  bool foundString = false;
+  IGNORE_UNUSED bool unterminatedEscapeSequence = false;
 
   for(; ptr < end; ){
     const char* loopStart = ptr;
@@ -807,7 +920,6 @@ TokenizeResult ParseCString(const char* start,const char* end){
 
     if(*ptr == '\"'){
       ptr += 1;
-      foundString = true;
       break;
     }
 

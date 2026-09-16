@@ -39,6 +39,9 @@ inline bool operator==(const PortInstance& p1,const PortInstance& p2){
   bool res = (p1.inst == p2.inst && p1.port == p2.port && p1.dir == p2.dir);
   return res;
 }
+inline bool Equal(const PortInstance& p1,const PortInstance& p2){
+  return (p1 == p2);
+}
 
 inline bool operator!=(const PortInstance& p1,const PortInstance& p2){
   bool res = !(p1 == p2);
@@ -133,6 +136,8 @@ struct ConnectionNode{
   ConnectionNode* next;
 };
 
+extern ConnectionNode ConnectionNode_Nil;
+
 enum NodeType{
   NodeType_UNCONNECTED,
   NodeType_SOURCE,
@@ -161,6 +166,7 @@ struct FUInstance{
     int portIndex;
     int muxGroup; // Merge multiplexers that belong to the same group must also have the same config (similar to shared units, but we want to separate the share mechanism from the mechanism used to represent multiplexers groups)
   };
+
   int sharedIndex;
   Array<bool> isSpecificConfigShared;
   bool isStatic;
@@ -173,12 +179,15 @@ struct FUInstance{
   ConnectionNode* allOutputs;
   Array<PortInstance> inputs;
   Array<bool> outputs;
-
-  Array<String> addressGenUsed;
   
   bool multipleSamePortInputs;
   NodeType type;
 };
+
+extern FUInstance FUInstance_NilInst;
+static IGNORE_UNUSED FUInstance* FUInstance_Nil = &FUInstance_NilInst;
+
+bool Nil(FUInstance* inst);
 
 enum AcceleratorPurpose{
   AcceleratorPurpose_TEMP,
@@ -214,6 +223,9 @@ inline bool operator==(const StaticId& id1,const StaticId& id2){
    bool res = CompareString(id1.name,id2.name) && id1.parent == id2.parent;
    return res;
 }
+inline bool Equal(StaticId& id1,const StaticId& id2){
+  return (id1 == id2);
+}
 
 struct StaticData{
   FUDeclaration* decl; // Declaration of unit that contains the origin of the given configs
@@ -224,7 +236,6 @@ struct StaticInfo{
    StaticId id;
    StaticData data;
 };
-
 
 struct WireInformation{
   Wire wire;
@@ -346,6 +357,9 @@ inline bool operator==(const SubMappingInfo& p1,const SubMappingInfo& p2){
               p1.isInput == p2.isInput);
   return res;
 }
+inline bool Equal(const SubMappingInfo& p1,const SubMappingInfo& p2){
+  return (p1 == p2);
+}
 
 typedef TrieMap<SubMappingInfo,PortInstance> SubMap;
 
@@ -423,10 +437,6 @@ String GenerateNewValidName(Accelerator* accel,String base,Arena* out);
 Array<FUDeclaration*> MemSubTypes(AccelInfo* info,Arena* out);
 
 Hashmap<StaticId,StaticData>* CollectStaticUnits(AccelInfo* info,Arena* out);
-
-// TODO: We kinda want to "remove" this since memories should be able to depend on parameters, but we currently calculate and instantiate memories because we cannot export memory info.
-int ExternalMemoryByteSize(ExternalMemoryInterface* inter);
-int ExternalMemoryByteSize(Array<ExternalMemoryInterface> interfaces); // Size of a simple memory mapping.
 
 // This computes the values for the top accelerator only.
 // Different of a regular accelerator because it can add more configs for DMA and other top level things
